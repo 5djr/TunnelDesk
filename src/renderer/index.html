@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>TunnelDesk</title>
+    <link rel="icon" type="image/png" href="./favicon.png" />
+    <link rel="stylesheet" href="./src/style.css" />
+  </head>
+  <body>
+    <div class="app">
+      <!-- Sidebar -->
+      <aside class="sidebar">
+        <div class="sidebar-brand">
+          <div class="brand-icon">
+            <img src="./favicon.png" width="20" height="20" alt="" draggable="false" />
+          </div>
+          <span class="brand-name">TunnelDesk</span>
+        </div>
+
+        <button class="nav-new-btn" id="new-connection">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 14 14"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+          >
+            <line x1="7" y1="1" x2="7" y2="13" />
+            <line x1="1" y1="7" x2="13" y2="7" />
+          </svg>
+          New Tunnel
+        </button>
+
+        <!-- Search -->
+        <div class="sidebar-search">
+          <svg
+            class="search-icon"
+            width="12"
+            height="12"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="11" cy="11" r="8" />
+            <line x1="21" y1="21" x2="16.65" y2="16.65" />
+          </svg>
+          <input
+            type="text"
+            class="search-input"
+            id="search-input"
+            placeholder="Search tunnels…"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </div>
+
+        <div class="sidebar-section-label">Tunnels</div>
+
+        <div class="sidebar-list" id="sidebar-list"></div>
+
+        <!-- Sidebar footer: Settings -->
+        <div class="sidebar-footer">
+          <button class="sidebar-settings-btn" id="settings-btn">
+            <svg
+              width="13"
+              height="13"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.8"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <circle cx="12" cy="12" r="3" />
+              <path
+                d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"
+              />
+            </svg>
+            Settings
+          </button>
+        </div>
+      </aside>
+
+      <!-- Main -->
+      <div class="main">
+        <div class="deps-warning hidden" id="deps-warning">
+          <svg
+            width="14"
+            height="14"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="2"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            aria-hidden="true"
+          >
+            <path
+              d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"
+            />
+            <line x1="12" y1="9" x2="12" y2="13" />
+            <line x1="12" y1="17" x2="12.01" y2="17" />
+          </svg>
+          <span id="deps-warning-text"></span>
+          <button
+            class="deps-warning-dismiss"
+            id="deps-warning-dismiss"
+            aria-label="Dismiss warning"
+          >
+            &times;
+          </button>
+        </div>
+
+        <div class="detail-panel" id="detail-panel"></div>
+
+        <div class="log-panel">
+          <div class="log-header">
+            <span>Activity</span>
+            <button class="log-clear" id="log-clear">Clear</button>
+          </div>
+          <div class="log-body" id="activity-log">
+            <div class="log-empty">No activity yet.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Toast -->
+    <div class="toast" id="toast"></div>
+
+    <!-- Add/Edit Modal -->
+    <div class="modal-overlay hidden" id="form-modal">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 class="modal-title" id="form-title">New Tunnel</h2>
+          <button class="modal-close" id="cancel-save" aria-label="Close">
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              stroke-linecap="round"
+            >
+              <line x1="1" y1="1" x2="11" y2="11" />
+              <line x1="11" y1="1" x2="1" y2="11" />
+            </svg>
+          </button>
+        </div>
+        <form id="save-form" novalidate>
+          <input type="hidden" id="connection-id" />
+          <div class="form-group">
+            <label class="form-label" for="protocol">Protocol</label>
+            <select class="form-input" id="protocol">
+              <optgroup label="Cloudflare Access">
+                <option value="rdp-cf">RDP via Cloudflare Access</option>
+                <option value="ssh-cf">SSH via Cloudflare Access</option>
+              </optgroup>
+              <optgroup label="Direct">
+                <option value="rdp">RDP (Direct)</option>
+                <option value="ssh">SSH (Direct)</option>
+                <option value="telnet">Telnet</option>
+                <option value="http">HTTP</option>
+                <option value="https">HTTPS</option>
+              </optgroup>
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="friendly-name">Display Name</label>
+              <input
+                class="form-input"
+                type="text"
+                id="friendly-name"
+                placeholder="e.g. Corp RDP"
+                autocomplete="off"
+              />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="conn-group"
+                >Group <span class="form-optional">optional</span></label
+              >
+              <input
+                class="form-input"
+                type="text"
+                id="conn-group"
+                placeholder="e.g. Production"
+                autocomplete="off"
+              />
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="hostname"
+              >Hostname <span class="form-required">*</span></label
+            >
+            <input
+              class="form-input"
+              type="text"
+              id="hostname"
+              placeholder="rdp.example.com"
+              autocomplete="off"
+            />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="port">Port</label>
+            <input
+              class="form-input"
+              type="number"
+              id="port"
+              value="3389"
+              min="1"
+              max="65535"
+            />
+          </div>
+          <div class="form-section-label">
+            Credentials <span class="form-optional">optional</span>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="cred-username">Username</label>
+              <input
+                class="form-input"
+                type="text"
+                id="cred-username"
+                placeholder="e.g. Administrator"
+                autocomplete="off"
+              />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="cred-password">Password</label>
+              <input
+                class="form-input"
+                type="password"
+                id="cred-password"
+                placeholder="••••••••"
+                autocomplete="new-password"
+              />
+            </div>
+          </div>
+          <!-- SSH key — shown only for ssh / ssh-cf protocols -->
+          <div class="form-group" id="ssh-key-group" style="display: none">
+            <label class="form-label" for="ssh-key-path"
+              >SSH Key File <span class="form-optional">optional</span></label
+            >
+            <div class="form-file-row">
+              <input
+                class="form-input"
+                type="text"
+                id="ssh-key-path"
+                placeholder="e.g. C:\keys\id_rsa.pem"
+                autocomplete="off"
+                readonly
+              />
+              <button type="button" class="btn btn-secondary btn-sm" id="ssh-key-browse">
+                Browse
+              </button>
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm"
+                id="ssh-key-clear"
+                title="Clear key"
+              >
+                &times;
+              </button>
+            </div>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="conn-notes"
+              >Notes <span class="form-optional">optional</span></label
+            >
+            <textarea
+              class="form-input form-textarea"
+              id="conn-notes"
+              placeholder="e.g. Dev server — ask John for access"
+              rows="2"
+              autocomplete="off"
+            ></textarea>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="cancel-save-bottom">
+              Cancel
+            </button>
+            <button type="submit" class="btn btn-primary">Save Tunnel</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Confirm Delete Modal -->
+    <div class="modal-overlay hidden" id="confirm-modal">
+      <div class="modal modal-confirm">
+        <div class="confirm-icon">
+          <svg
+            width="22"
+            height="22"
+            viewBox="0 0 22 22"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.8"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <circle cx="11" cy="11" r="9" />
+            <line x1="11" y1="7" x2="11" y2="11" />
+            <line x1="11" y1="15" x2="11.01" y2="15" />
+          </svg>
+        </div>
+        <h2 class="modal-title">Delete Tunnel</h2>
+        <p class="confirm-message" id="confirm-message">
+          Are you sure you want to delete this tunnel?
+        </p>
+        <div class="form-actions">
+          <button class="btn btn-ghost" id="confirm-cancel">Cancel</button>
+          <button class="btn btn-danger" id="confirm-ok">Delete</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>

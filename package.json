@@ -1,0 +1,67 @@
+{
+  "name": "tunneldesk",
+  "productName": "TunnelDesk",
+  "version": "0.1.0",
+  "description": "Cloudflare Zero Trust RDP connection manager for Windows",
+  "main": "src/main/index.js",
+  "scripts": {
+    "start": "electron .",
+    "build:renderer": "vite build",
+    "dev": "npm run build:renderer && electron .",
+    "dist": "npm run build:renderer && electron-builder --win --x64"
+  },
+  "build": {
+    "appId": "com.tunneldesk.app",
+    "productName": "TunnelDesk",
+    "copyright": "TunnelDesk",
+    "icon": "assets/icon.png",
+    "directories": {
+      "output": "dist-app"
+    },
+    "files": [
+      "src/main/**/*.js",
+      "src/preload.js",
+      "assets/icon.png",
+      "assets/icon.ico",
+      "dist/renderer/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "msi",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "requestedExecutionLevel": "asInvoker",
+      "forceCodeSigning": false
+    },
+    "msi": {
+      "oneClick": false,
+      "perMachine": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TunnelDesk",
+      "runAfterFinish": true
+    },
+    "asar": true,
+    "asarUnpack": []
+  },
+  "devDependencies": {
+    "electron": "^26.2.0",
+    "electron-builder": "^26.8.1",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.14"
+  },
+  "keywords": [
+    "electron",
+    "cloudflare",
+    "rdp",
+    "windows"
+  ],
+  "author": "TunnelDesk",
+  "license": "MIT"
+}
