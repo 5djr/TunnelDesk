@@ -67,4 +67,13 @@ function getLogFilePath() {
   return logFilePath();
 }
 
-module.exports = { initLogger, writeLog, getLogFilePath };
+function closeLogger() {
+  if (writeStream) {
+    try {
+      writeStream.end();
+    } catch {}
+    writeStream = null;
+  }
+}
+
+module.exports = { initLogger, writeLog, getLogFilePath, closeLogger };

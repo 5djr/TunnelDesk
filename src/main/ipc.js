@@ -249,8 +249,13 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("open-external", async (event, url) => {
-    if (typeof url === "string" && /^https?:\/\//.test(url)) {
-      await shell.openExternal(url);
+    if (typeof url !== "string") return;
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return;
+      await shell.openExternal(parsed.href);
+    } catch {
+      // Invalid URL — silently ignore.
     }
   });
 }

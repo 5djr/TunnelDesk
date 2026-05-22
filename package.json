@@ -57,7 +57,7 @@
     "asarUnpack": []
   },
   "devDependencies": {
-    "electron": "^26.2.0",
+    "electron": "^42.2.0",
     "electron-builder": "^26.8.1",
     "typescript": "^6.0.3",
     "vite": "^8.0.14"

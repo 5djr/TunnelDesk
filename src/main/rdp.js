@@ -1,3 +1,4 @@
+const fs = require("fs");
 const { spawn } = require("child_process");
 const { activeConnections } = require("./state");
 const { safeSend, sendConnectionLog, updateStatus } = require("./messaging");
@@ -103,7 +104,15 @@ async function launchSshClient(hostname, port, username, connectionId, sshKeyPat
   const target = username ? `${username}@${hostname}` : hostname;
   const sshArgs = [];
   if (sshKeyPath && sshKeyPath.trim()) {
-    sshArgs.push("-i", sshKeyPath.trim());
+    const keyPath = sshKeyPath.trim();
+    if (!fs.existsSync(keyPath)) {
+      sendConnectionLog(
+        connectionId,
+        `SSH key not found: ${keyPath} — connecting without key.`,
+      );
+    } else {
+      sshArgs.push("-i", keyPath);
+    }
   }
   sshArgs.push("-p", String(port), target);
   const proc = spawn("cmd", ["/c", "start", `SSH — ${hostname}`, "ssh", ...sshArgs], {

@@ -1104,7 +1104,9 @@ body {
   color: var(--text);
   font-family: var(--font);
   outline: none;
-  transition: background 0.1s, border-color 0.1s;
+  transition:
+    background 0.1s,
+    border-color 0.1s;
 }
 
 .search-input::placeholder {

@@ -6,7 +6,7 @@ const { fetchCloudflaredVersion } = require("./system");
 const { createWindow } = require("./window");
 const { registerIpcHandlers } = require("./ipc");
 const { readSettings } = require("./settings");
-const { initLogger } = require("./logger");
+const { initLogger, closeLogger } = require("./logger");
 const { createTray } = require("./tray");
 const { connectById, disconnectById } = require("./actions");
 
@@ -37,6 +37,7 @@ process.on("unhandledRejection", (reason) => {
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 app.on("before-quit", () => {
+  const { spawnSync } = require("child_process");
   state.forceQuit = true;
   for (const [, active] of activeConnections) {
     if (active.mstscProc && active.mstscProc.exitCode === null) {
@@ -49,9 +50,28 @@ app.on("before-quit", () => {
         active.proc.kill();
       } catch {}
     }
+    // Remove any RDP credentials stored in Windows Credential Manager so they
+    // don't persist after the app exits.
+    const proto = active.connection && (active.connection.protocol || "rdp-cf");
+    if (proto === "rdp-cf" || proto === "rdp") {
+      const port = active.connection.port;
+      try {
+        spawnSync("cmdkey", [`/delete:TERMSRV/localhost:${port}`], {
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        if (port === 3389) {
+          spawnSync("cmdkey", ["/delete:TERMSRV/localhost"], {
+            windowsHide: true,
+            stdio: "ignore",
+          });
+        }
+      } catch {}
+    }
   }
   activeConnections.clear();
   latencyHistory.clear();
+  closeLogger();
 });
 
 app.whenReady().then(async () => {

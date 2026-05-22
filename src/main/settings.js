@@ -10,6 +10,16 @@ const DEFAULTS = {
   logRetentionDays: 30,
 };
 
+const VALID_PROTOCOLS = new Set([
+  "rdp-cf",
+  "rdp",
+  "ssh-cf",
+  "ssh",
+  "telnet",
+  "http",
+  "https",
+]);
+
 function settingsPath() {
   return path.join(state.userDataPath, "settings.json");
 }
@@ -25,7 +35,29 @@ async function readSettings() {
 
 async function writeSettings(partial) {
   const current = await readSettings();
-  const merged = { ...current, ...partial };
+  // Only accept known keys with validated types to prevent arbitrary key injection.
+  const safe = {};
+  if (typeof partial.cloudflaredPath === "string") {
+    // Reject null bytes and shell metacharacters that could affect spawn().
+    const p = partial.cloudflaredPath.trim();
+    safe.cloudflaredPath = /[\x00<>|;&^`]/.test(p) ? "" : p.slice(0, 512);
+  }
+  if (VALID_PROTOCOLS.has(partial.defaultProtocol)) {
+    safe.defaultProtocol = partial.defaultProtocol;
+  }
+  if (typeof partial.minimizeToTray === "boolean") {
+    safe.minimizeToTray = partial.minimizeToTray;
+  }
+  if (typeof partial.startMinimized === "boolean") {
+    safe.startMinimized = partial.startMinimized;
+  }
+  if (typeof partial.logRetentionDays === "number") {
+    safe.logRetentionDays = Math.max(
+      1,
+      Math.min(365, Math.floor(partial.logRetentionDays)),
+    );
+  }
+  const merged = { ...current, ...safe };
   const tmp = settingsPath() + ".tmp";
   await fs.writeFile(tmp, JSON.stringify(merged, null, 2), "utf8");
   await fs.rename(tmp, settingsPath());

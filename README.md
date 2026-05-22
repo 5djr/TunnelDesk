@@ -35,10 +35,10 @@ A Windows desktop app for managing [Cloudflare Zero Trust](https://www.cloudflar
 
 Download the latest installer from the [Releases](https://github.com/5djr/TunnelDesk/releases) page:
 
-| File | Type |
-|------|------|
+| File                   | Type                                                |
+| ---------------------- | --------------------------------------------------- |
 | `TunnelDesk x.x.x.msi` | Standard installer — recommended, no admin required |
-| `TunnelDesk x.x.x.exe` | Portable — runs without installing |
+| `TunnelDesk x.x.x.exe` | Portable — runs without installing                  |
 
 ---
 
@@ -63,12 +63,12 @@ Built artifacts are output to `dist-app/`.
 
 TunnelDesk is built on top of the following open-source projects:
 
-| Package | License |
-|---------|---------|
-| [Electron](https://www.electronjs.org/) | MIT |
-| [Vite](https://vitejs.dev/) | MIT |
-| [TypeScript](https://www.typescriptlang.org/) | Apache 2.0 |
-| [electron-builder](https://www.electron.build/) | MIT |
+| Package                                         | License    |
+| ----------------------------------------------- | ---------- |
+| [Electron](https://www.electronjs.org/)         | MIT        |
+| [Vite](https://vitejs.dev/)                     | MIT        |
+| [TypeScript](https://www.typescriptlang.org/)   | Apache 2.0 |
+| [electron-builder](https://www.electron.build/) | MIT        |
 
 TunnelDesk launches `cloudflared` as an external process. `cloudflared` is developed by Cloudflare, Inc. and is subject to its own [license](https://github.com/cloudflare/cloudflared/blob/master/LICENSE). TunnelDesk does not bundle or redistribute `cloudflared`.
 
