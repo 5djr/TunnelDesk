@@ -1,20 +1,18 @@
-const { state, connectionStatuses } = require("./state");
+const { BrowserWindow } = require("electron");
+const { connectionStatuses } = require("./state");
 const { writeLog } = require("./logger");
 
-// Guards against the TOCTOU race where the window is destroyed between the
-// null-check and the actual .send() call, which throws and crashes the process.
+// Broadcasts to every open window. Needed so terminal windows spawned from the
+// main window also receive ssh-data, ssh-close, and status-update events.
 function safeSend(channel, data) {
   try {
-    if (
-      state.mainWindow &&
-      !state.mainWindow.isDestroyed() &&
-      state.mainWindow.webContents &&
-      !state.mainWindow.webContents.isDestroyed()
-    ) {
-      state.mainWindow.webContents.send(channel, data);
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed() && win.webContents && !win.webContents.isDestroyed()) {
+        win.webContents.send(channel, data);
+      }
     }
   } catch {
-    // Window was destroyed between the checks — nothing to do.
+    // A window was destroyed between the check and the send — nothing to do.
   }
 }
 

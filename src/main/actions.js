@@ -2,6 +2,7 @@ const { shell } = require("electron");
 const { readConnections } = require("./connections");
 const { decryptPassword } = require("./crypto");
 const { readSettings } = require("./settings");
+const { activeConnections } = require("./state");
 const { startCloudflared, stopConnection } = require("./tunnel");
 const {
   launchRemoteDesktop,
@@ -9,7 +10,8 @@ const {
   launchSshClient,
   launchTelnetClient,
 } = require("./rdp");
-const { sendConnectionLog } = require("./messaging");
+const { sendConnectionLog, updateStatus } = require("./messaging");
+const { closeSessionsForConnection } = require("./ssh-session");
 
 async function connectById(connectionId) {
   const connections = await readConnections();
@@ -33,23 +35,27 @@ async function connectById(connectionId) {
     await launchRemoteDesktopDirect(connection, password);
   } else if (protocol === "ssh-cf") {
     await startCloudflared(connection, password, settings.cloudflaredPath);
-    await launchSshClient(
-      "localhost",
-      connection.port,
-      connection.username,
-      connection.id,
-      connection.sshKeyPath,
-    );
+    // Embedded terminal is opened by the renderer via IPC after connect resolves.
   } else if (protocol === "ssh") {
-    await launchSshClient(
-      connection.hostname,
-      connection.port,
-      connection.username,
-      connection.id,
-      connection.sshKeyPath,
-    );
+    updateStatus(connection.id, "connecting");
+    activeConnections.set(connection.id, {
+      proc: null,
+      connection,
+      password,
+      connectedAt: null, // set when SSH session actually establishes
+    });
+    // Status is updated to "connected" / "disconnected" by the terminal window
+    // once ssh2 actually succeeds or fails — see ssh-report-status IPC.
   } else if (protocol === "telnet") {
+    updateStatus(connection.id, "connecting");
+    activeConnections.set(connection.id, {
+      proc: null,
+      connection,
+      password,
+      connectedAt: Date.now(),
+    });
     await launchTelnetClient(connection.hostname, connection.port, connection.id);
+    updateStatus(connection.id, "connected");
   } else if (protocol === "http" || protocol === "https") {
     const url = `${protocol}://${connection.hostname}:${connection.port}`;
     await shell.openExternal(url);
@@ -60,6 +66,7 @@ async function connectById(connectionId) {
 }
 
 async function disconnectById(connectionId) {
+  closeSessionsForConnection(connectionId);
   await stopConnection(connectionId);
   return { status: "disconnected" };
 }

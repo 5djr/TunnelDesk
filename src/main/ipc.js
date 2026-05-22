@@ -2,6 +2,17 @@ const os = require("os");
 const path = require("path");
 const { ipcMain, shell, dialog } = require("electron");
 const {
+  sshCreateTerm,
+  sshCreateSftp,
+  sshWrite,
+  sshResize,
+  sshCloseSession,
+  sftpList,
+  sftpHome,
+  sftpDownload,
+  sftpUpload,
+} = require("./ssh-session");
+const {
   state,
   activeConnections,
   connectionStatuses,
@@ -26,7 +37,7 @@ const {
 const { checkDependencies, getProcessMemoryBytes } = require("./system");
 const { measureRoundTripLatency } = require("./latency");
 const { isProcessAlive, stopConnection } = require("./tunnel");
-const { updateStatus, sendConnectionLog } = require("./messaging");
+const { updateStatus, sendConnectionLog, safeSend } = require("./messaging");
 const { connectById, disconnectById } = require("./actions");
 const { readSettings, writeSettings } = require("./settings");
 const { getLogFilePath } = require("./logger");
@@ -234,7 +245,9 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("pick-file", async (event, opts = {}) => {
-    const result = await dialog.showOpenDialog(state.mainWindow, {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
+    const result = await dialog.showOpenDialog(win, {
       title: opts.title || "Select File",
       properties: ["openFile"],
       filters: opts.filters || [{ name: "All Files", extensions: ["*"] }],
@@ -248,6 +261,12 @@ function registerIpcHandlers() {
     await shell.showItemInFolder(logPath);
   });
 
+  ipcMain.handle("open-term-window", (_event, { connId, label }) => {
+    const { createTerminalWindow } = require("./window");
+    createTerminalWindow(connId, label || "Terminal");
+    return { status: "opened" };
+  });
+
   ipcMain.handle("open-external", async (event, url) => {
     if (typeof url !== "string") return;
     try {
@@ -257,6 +276,90 @@ function registerIpcHandlers() {
     } catch {
       // Invalid URL — silently ignore.
     }
+  });
+
+  // ─── SSH status reporting (ssh direct only) ────────────────────────────────
+  // Terminal window calls this after sshTermCreate succeeds or fails so the
+  // main window shows the correct connected / disconnected status.
+
+  ipcMain.handle("ssh-report-status", (_event, { connId, ok }) => {
+    if (ok) {
+      const entry = activeConnections.get(connId);
+      if (entry) {
+        if (!entry.connectedAt) entry.connectedAt = Date.now();
+        updateStatus(connId, "connected");
+      }
+    } else {
+      activeConnections.delete(connId);
+      updateStatus(connId, "disconnected");
+    }
+  });
+
+  // ─── SSH terminal ──────────────────────────────────────────────────────────
+
+  ipcMain.handle("ssh-term-create", async (_event, connectionId) => {
+    return sshCreateTerm(
+      connectionId,
+      (id, data) =>
+        safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
+      (id, code, signal) => safeSend("ssh-close", { sid: id, code, signal }),
+    );
+  });
+
+  ipcMain.handle("ssh-sftp-create", async (_event, connectionId) => {
+    return sshCreateSftp(connectionId, (id) =>
+      safeSend("ssh-close", { sid: id, code: null, signal: null }),
+    );
+  });
+
+  ipcMain.handle("ssh-write", (_event, { sid, data }) => {
+    sshWrite(sid, data);
+  });
+
+  ipcMain.handle("ssh-resize", (_event, { sid, cols, rows }) => {
+    sshResize(sid, cols, rows);
+  });
+
+  ipcMain.handle("ssh-close-session", (_event, sid) => {
+    sshCloseSession(sid);
+  });
+
+  // ─── SFTP operations ───────────────────────────────────────────────────────
+
+  ipcMain.handle("sftp-list", (_event, { sid, remotePath }) => {
+    return sftpList(sid, remotePath);
+  });
+
+  ipcMain.handle("sftp-home", (_event, sid) => {
+    return sftpHome(sid);
+  });
+
+  ipcMain.handle("sftp-download", async (event, { sid, remotePath }) => {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
+    const filename = remotePath.split("/").pop() || "file";
+    const result = await dialog.showSaveDialog(win, {
+      title: "Save File",
+      defaultPath: filename,
+    });
+    if (result.canceled) return { canceled: true };
+    await sftpDownload(sid, remotePath, result.filePath);
+    return { filePath: result.filePath };
+  });
+
+  ipcMain.handle("sftp-upload", async (event, { sid, remotePath }) => {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
+    const result = await dialog.showOpenDialog(win, {
+      title: "Select File to Upload",
+      properties: ["openFile"],
+    });
+    if (result.canceled) return { canceled: true };
+    const localPath = result.filePaths[0];
+    const filename = path.basename(localPath);
+    const dest = remotePath.replace(/\/?$/, "/") + filename;
+    await sftpUpload(sid, localPath, dest);
+    return { dest };
   });
 }
 

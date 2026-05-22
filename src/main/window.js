@@ -69,4 +69,33 @@ function createWindow() {
   });
 }
 
-module.exports = { createWindow };
+function createTerminalWindow(connId, label) {
+  const win = new BrowserWindow({
+    width: 900,
+    height: 620,
+    minWidth: 600,
+    minHeight: 400,
+    resizable: true,
+    show: false,
+    backgroundColor: "#1b1b1b",
+    title: label ? `${label} — Terminal` : "Terminal",
+    icon: path.join(__dirname, "..", "..", "assets", "icon.png"),
+    webPreferences: {
+      preload: path.join(__dirname, "..", "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, "..", "..", "dist", "renderer", "index.html"), {
+    query: { mode: "terminal", connId },
+  });
+  win.setMenuBarVisibility(false);
+  win.setMenu(null);
+  win.once("ready-to-show", () => win.show());
+  return win;
+}
+
+module.exports = { createWindow, createTerminalWindow };

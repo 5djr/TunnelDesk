@@ -1,4 +1,6 @@
-export {};
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -54,6 +56,40 @@ interface Settings {
   logRetentionDays: number;
 }
 
+type TermTabType = "term" | "sftp";
+
+interface SftpEntry {
+  name: string;
+  size: number;
+  isDir: boolean;
+  isSymlink: boolean;
+  mode: number;
+  mtime: number;
+}
+
+interface TermTab {
+  tabId: string;
+  type: TermTabType;
+  sessionId: string | null;
+  label: string;
+  term: Terminal | null;
+  fitAddon: FitAddon | null;
+  el: HTMLDivElement; // persistent DOM element — moved in/out of detailPanel
+  closed: boolean;
+  error: string | null;
+  // sftp state
+  sftpPath: string;
+  sftpEntries: SftpEntry[];
+  sftpLoading: boolean;
+  sftpSelected: string | null;
+  sftpShowHidden: boolean;
+}
+
+interface ConnTermState {
+  tabs: TermTab[];
+  activeTabId: string | null;
+}
+
 declare global {
   interface Window {
     api: {
@@ -85,9 +121,31 @@ declare global {
       }): Promise<string | null>;
       openLogFolder(): Promise<void>;
       openExternal(url: string): Promise<void>;
+      openTermWindow(connId: string, label: string): Promise<void>;
+      sshReportStatus(connId: string, ok: boolean): Promise<void>;
       onStatusUpdate(cb: (data: { id: string; status: ConnectionStatus }) => void): void;
       onLog(cb: (data: { id?: string; message: string }) => void): void;
       onRdpClosed(cb: (data: { id: string }) => void): void;
+      onRdpReconnected(cb: (data: { id: string }) => void): void;
+      sshTermCreate(connectionId: string): Promise<string>;
+      sshSftpCreate(connectionId: string): Promise<string>;
+      sshWrite(sid: string, data: string): Promise<void>;
+      sshResize(sid: string, cols: number, rows: number): Promise<void>;
+      sshCloseSession(sid: string): Promise<void>;
+      sftpList(sid: string, remotePath: string): Promise<SftpEntry[]>;
+      sftpHome(sid: string): Promise<string>;
+      sftpDownload(
+        sid: string,
+        remotePath: string,
+      ): Promise<{ canceled?: boolean; filePath?: string }>;
+      sftpUpload(
+        sid: string,
+        remotePath: string,
+      ): Promise<{ canceled?: boolean; dest?: string }>;
+      onSshData(cb: (d: { sid: string; data: string }) => void): void;
+      onSshClose(
+        cb: (d: { sid: string; code: number | null; signal: string | null }) => void,
+      ): void;
       onDepsStatus(cb: (data: { cloudflared: boolean; mstsc: boolean }) => void): void;
       onAuthRequired(cb: (data: { id: string; url: string }) => void): void;
     };
@@ -108,10 +166,52 @@ let searchQuery = "";
 const collapsedGroups = new Set<string>();
 let currentSettings: Settings | null = null;
 
+// ─── Terminal window mode ─────────────────────────────────────────────────────
+// When loaded with ?mode=terminal&connId=<id> we render only the terminal view,
+// hiding the main app layout. Computed once at module load from the URL.
+const _twParams = new URLSearchParams(window.location.search);
+const IS_TERMINAL_WINDOW = _twParams.get("mode") === "terminal";
+const TERM_WIN_CONN_ID = IS_TERMINAL_WINDOW ? (_twParams.get("connId") ?? null) : null;
+
+// ─── Terminal state ───────────────────────────────────────────────────────────
+// Keyed by connectionId; values survive re-renders so xterm instances aren't recreated.
+const termState = new Map<string, ConnTermState>();
+// Reverse map: sessionId → { connId, tabId } for routing ssh-data events.
+const sidToTab = new Map<string, { connId: string; tabId: string }>();
+let termTabCounter = 0;
+
+function genTabId(): string {
+  return `tab-${++termTabCounter}`;
+}
+
+const xtermTheme = {
+  background: "#1b1b1b",
+  foreground: "rgba(255,255,255,0.92)",
+  cursor: "rgba(255,255,255,0.8)",
+  cursorAccent: "#1b1b1b",
+  selectionBackground: "rgba(255,255,255,0.2)",
+  black: "#000000",
+  red: "#f85149",
+  green: "#6ccb5f",
+  yellow: "#f9a825",
+  blue: "#4d9ef5",
+  magenta: "#bc8cff",
+  cyan: "#56d4dd",
+  white: "#d4d4d4",
+  brightBlack: "#666666",
+  brightRed: "#f97f76",
+  brightGreen: "#89d185",
+  brightYellow: "#ffcc02",
+  brightBlue: "#6dbeff",
+  brightMagenta: "#d0b0ff",
+  brightCyan: "#7ad9f1",
+  brightWhite: "#ffffff",
+};
+
 // ─── DOM Refs ─────────────────────────────────────────────────────────────────
 
 const sidebarList = document.getElementById("sidebar-list") as HTMLElement;
-const detailPanel = document.getElementById("detail-panel") as HTMLElement;
+let detailPanel = document.getElementById("detail-panel") as HTMLElement;
 const activityLog = document.getElementById("activity-log") as HTMLElement;
 const logClearBtn = document.getElementById("log-clear") as HTMLButtonElement;
 const formModal = document.getElementById("form-modal") as HTMLElement;
@@ -177,6 +277,156 @@ function formatAbsTime(ms: number | null): string {
     second: "2-digit",
     hour12: false,
   });
+}
+
+// ─── SFTP Helpers ─────────────────────────────────────────────────────────────
+
+function formatMtime(ms: number): string {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  const now = new Date();
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const mo = d.toLocaleString("default", { month: "short" });
+  const day = String(d.getDate()).padStart(2, " ");
+  if (sameYear) {
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return `${mo} ${day}  ${hh}:${mm}`;
+  }
+  return `${mo} ${day}  ${d.getFullYear()}`;
+}
+
+type SftpIconKind =
+  | "folder"
+  | "symlink"
+  | "image"
+  | "archive"
+  | "code"
+  | "config"
+  | "text"
+  | "pdf"
+  | "binary";
+
+function sftpIconKind(entry: SftpEntry): SftpIconKind {
+  if (entry.isDir) return "folder";
+  if (entry.isSymlink) return "symlink";
+  const ext = (entry.name.split(".").pop() ?? "").toLowerCase();
+  if (
+    [
+      "jpg",
+      "jpeg",
+      "png",
+      "gif",
+      "svg",
+      "webp",
+      "ico",
+      "bmp",
+      "tiff",
+      "tif",
+      "heic",
+    ].includes(ext)
+  )
+    return "image";
+  if (
+    [
+      "zip",
+      "tar",
+      "gz",
+      "bz2",
+      "xz",
+      "rar",
+      "7z",
+      "deb",
+      "rpm",
+      "pkg",
+      "apk",
+      "tgz",
+      "tbz2",
+      "lzma",
+      "zst",
+    ].includes(ext)
+  )
+    return "archive";
+  if (
+    [
+      "js",
+      "ts",
+      "jsx",
+      "tsx",
+      "py",
+      "sh",
+      "bash",
+      "zsh",
+      "fish",
+      "c",
+      "cpp",
+      "h",
+      "hpp",
+      "java",
+      "go",
+      "rs",
+      "rb",
+      "php",
+      "lua",
+      "r",
+      "swift",
+      "kt",
+      "cs",
+      "vb",
+      "pl",
+      "ps1",
+      "bat",
+      "cmd",
+      "awk",
+      "sed",
+    ].includes(ext)
+  )
+    return "code";
+  if (
+    [
+      "json",
+      "yaml",
+      "yml",
+      "toml",
+      "xml",
+      "ini",
+      "conf",
+      "cfg",
+      "env",
+      "properties",
+      "plist",
+      "htaccess",
+      "gitignore",
+      "dockerignore",
+    ].includes(ext)
+  )
+    return "config";
+  if (
+    ["txt", "md", "rst", "log", "csv", "tsv", "readme", "nfo", "diff", "patch"].includes(
+      ext,
+    )
+  )
+    return "text";
+  if (ext === "pdf") return "pdf";
+  return "binary";
+}
+
+const SFTP_ICON_SVG: Record<SftpIconKind, string> = {
+  folder: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M1 4.5C1 3.67 1.67 3 2.5 3H6l1.5 1.5H13.5C14.33 4.5 15 5.17 15 6V12.5C15 13.33 14.33 14 13.5 14h-11C1.67 14 1 13.33 1 12.5V4.5Z" fill="#5b9bd5" opacity="0.85"/></svg>`,
+  symlink: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M3 8.5 7.5 4v3c3.5 0 5.5 1.5 5.5 5-.8-2-2.5-2.5-5.5-2.5v3L3 8.5Z" fill="#56d1c7"/></svg>`,
+  image: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="1.5" y="2.5" width="13" height="11" rx="1.5" stroke="#9d7dea" stroke-width="1.3"/><circle cx="5.5" cy="6" r="1.25" fill="#9d7dea"/><path d="M1.5 11 5 7.5l2.5 2.5 2-2L14.5 12" stroke="#9d7dea" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  archive: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2" y="2" width="12" height="12" rx="1.5" stroke="#e0a057" stroke-width="1.3"/><line x1="5" y1="2" x2="5" y2="14" stroke="#e0a057" stroke-width="1.3"/><line x1="5" y1="5" x2="7.5" y2="5" stroke="#e0a057" stroke-width="1.3"/><line x1="5" y1="8" x2="7.5" y2="8" stroke="#e0a057" stroke-width="1.3"/><line x1="5" y1="11" x2="7.5" y2="11" stroke="#e0a057" stroke-width="1.3"/></svg>`,
+  code: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M5 4.5 1.5 8 5 11.5M11 4.5 14.5 8 11 11.5M9.5 3 6.5 13" stroke="#6ccb5f" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`,
+  config: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><circle cx="8" cy="8" r="5.5" stroke="#f5a97f" stroke-width="1.3"/><circle cx="8" cy="8" r="2" stroke="#f5a97f" stroke-width="1.3"/><line x1="8" y1="2" x2="8" y2="3.5" stroke="#f5a97f" stroke-width="1.3"/><line x1="8" y1="12.5" x2="8" y2="14" stroke="#f5a97f" stroke-width="1.3"/><line x1="2" y1="8" x2="3.5" y2="8" stroke="#f5a97f" stroke-width="1.3"/><line x1="12.5" y1="8" x2="14" y2="8" stroke="#f5a97f" stroke-width="1.3"/></svg>`,
+  text: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="1.5" width="11" height="13" rx="1.5" stroke="#a0a0a0" stroke-width="1.3"/><line x1="5" y1="5.5" x2="11" y2="5.5" stroke="#a0a0a0" stroke-width="1.2" stroke-linecap="round"/><line x1="5" y1="8" x2="11" y2="8" stroke="#a0a0a0" stroke-width="1.2" stroke-linecap="round"/><line x1="5" y1="10.5" x2="8.5" y2="10.5" stroke="#a0a0a0" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+  pdf: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="1.5" width="11" height="13" rx="1.5" stroke="#f85149" stroke-width="1.3"/><text x="8" y="10.5" text-anchor="middle" fill="#f85149" font-size="5" font-weight="700" font-family="sans-serif">PDF</text></svg>`,
+  binary: `<svg width="15" height="15" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg"><rect x="2.5" y="1.5" width="11" height="13" rx="1.5" stroke="rgba(255,255,255,0.25)" stroke-width="1.3"/><line x1="5" y1="5.5" x2="11" y2="5.5" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" stroke-linecap="round"/><line x1="5" y1="8" x2="11" y2="8" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" stroke-linecap="round"/><line x1="5" y1="10.5" x2="11" y2="10.5" stroke="rgba(255,255,255,0.25)" stroke-width="1.2" stroke-linecap="round"/></svg>`,
+};
+
+// Join POSIX-style remote paths safely (avoids Windows path.join).
+function sftpJoin(...parts: string[]): string {
+  const joined = parts.join("/").replace(/\/+/g, "/");
+  return joined || "/";
 }
 
 // ─── Protocol Helpers ─────────────────────────────────────────────────────────
@@ -516,6 +766,547 @@ async function updateDebugStats(connId: string) {
   }
 }
 
+// ─── Terminal management ──────────────────────────────────────────────────────
+
+function getOrInitTermState(connId: string): ConnTermState {
+  if (!termState.has(connId)) termState.set(connId, { tabs: [], activeTabId: null });
+  return termState.get(connId)!;
+}
+
+function makeTabEl(): HTMLDivElement {
+  const el = document.createElement("div");
+  el.className = "term-panel";
+  return el;
+}
+
+async function addTermTab(connId: string, type: TermTabType): Promise<void> {
+  const state = getOrInitTermState(connId);
+  const tabId = genTabId();
+  const label =
+    type === "sftp"
+      ? "File Transfer"
+      : `Terminal ${state.tabs.filter((t) => t.type === "term").length + 1}`;
+  const el = makeTabEl();
+
+  const tab: TermTab = {
+    tabId,
+    type,
+    sessionId: null,
+    label,
+    term: null,
+    fitAddon: null,
+    el,
+    closed: false,
+    error: null,
+    sftpPath: "/",
+    sftpEntries: [],
+    sftpLoading: type === "sftp", // start spinner immediately for SFTP tabs
+    sftpSelected: null,
+    sftpShowHidden: false,
+  };
+  state.tabs.push(tab);
+  state.activeTabId = tabId;
+
+  if (type === "term") {
+    const term = new Terminal({
+      theme: xtermTheme,
+      fontFamily: '"Cascadia Code", "Consolas", "Monaco", monospace',
+      fontSize: 13,
+      lineHeight: 1.25,
+      cursorBlink: true,
+      allowProposedApi: true,
+    });
+    const fitAddon = new FitAddon();
+    term.loadAddon(fitAddon);
+    term.open(el);
+    tab.term = term;
+    tab.fitAddon = fitAddon;
+  }
+
+  // Render the shell immediately (tab bar appears, session shows loading state).
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+
+  // For ssh (direct), the main process leaves status at "connecting" until we
+  // confirm the session succeeded or failed.
+  const isSshDirect = connections.find((c) => c.id === connId)?.protocol === "ssh";
+
+  try {
+    if (type === "term") {
+      const sid = await window.api.sshTermCreate(connId);
+      tab.sessionId = sid;
+      sidToTab.set(sid, { connId, tabId });
+      tab.term!.onData((data) => window.api.sshWrite(sid, data));
+      tab.term!.onResize(({ cols, rows }) => window.api.sshResize(sid, cols, rows));
+      tab.fitAddon!.fit();
+      if (isSshDirect) void window.api.sshReportStatus(connId, true);
+    } else {
+      const sid = await window.api.sshSftpCreate(connId);
+      tab.sessionId = sid;
+      sidToTab.set(sid, { connId, tabId });
+      try {
+        tab.sftpPath = await window.api.sftpHome(sid);
+        tab.sftpEntries = await window.api.sftpList(sid, tab.sftpPath);
+      } catch (e) {
+        tab.error = e instanceof Error ? e.message : String(e);
+      }
+      tab.sftpLoading = false;
+      // SFTP tabs never drive connection status — only the terminal tab does.
+    }
+  } catch (err) {
+    let msg = err instanceof Error ? err.message : String(err);
+    // Electron wraps IPC rejections with "Error invoking remote method '...': Error: ..."
+    msg = msg.replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
+    tab.error = msg;
+    tab.closed = true;
+    // Only terminal tabs own the ssh-direct connection status.
+    if (isSshDirect && type === "term") void window.api.sshReportStatus(connId, false);
+  }
+
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+}
+
+function closeTermTab(connId: string, tabId: string): void {
+  const state = termState.get(connId);
+  if (!state) return;
+  const tab = state.tabs.find((t) => t.tabId === tabId);
+  if (!tab) return;
+  if (tab.sessionId) {
+    sidToTab.delete(tab.sessionId);
+    void window.api.sshCloseSession(tab.sessionId);
+  }
+  tab.term?.dispose();
+  state.tabs = state.tabs.filter((t) => t.tabId !== tabId);
+  if (state.activeTabId === tabId) {
+    state.activeTabId = state.tabs[state.tabs.length - 1]?.tabId ?? null;
+  }
+  if (state.tabs.length === 0) {
+    termState.delete(connId);
+    if (IS_TERMINAL_WINDOW) {
+      window.close();
+      return;
+    }
+  }
+  if (selectedId === connId) {
+    if (IS_TERMINAL_WINDOW) {
+      const conn = connections.find((c) => c.id === connId);
+      if (conn) renderTerminalDetail(conn);
+    } else {
+      renderDetail();
+    }
+  }
+}
+
+function switchTermTab(connId: string, tabId: string): void {
+  const state = termState.get(connId);
+  if (!state) return;
+  state.activeTabId = tabId;
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+}
+
+function fitActiveTerminal(connId: string): void {
+  const state = termState.get(connId);
+  if (!state) return;
+  const tab = state.tabs.find((t) => t.tabId === state.activeTabId);
+  if (tab?.fitAddon) {
+    try {
+      tab.fitAddon.fit();
+    } catch {}
+  }
+}
+
+function closeAllTermTabs(connId: string): void {
+  const state = termState.get(connId);
+  if (!state) return;
+  for (const tab of state.tabs) {
+    if (tab.sessionId) {
+      sidToTab.delete(tab.sessionId);
+      void window.api.sshCloseSession(tab.sessionId);
+    }
+    tab.term?.dispose();
+  }
+  termState.delete(connId);
+}
+
+async function sftpNavigate(
+  connId: string,
+  tabId: string,
+  newPath: string,
+): Promise<void> {
+  const state = termState.get(connId);
+  if (!state) return;
+  const tab = state.tabs.find((t) => t.tabId === tabId);
+  if (!tab || !tab.sessionId || tab.type !== "sftp") return;
+  tab.sftpLoading = true;
+  tab.error = null;
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  try {
+    const entries = await window.api.sftpList(tab.sessionId, newPath);
+    tab.sftpPath = newPath;
+    tab.sftpEntries = entries;
+    tab.sftpSelected = null;
+  } catch (e) {
+    tab.error = e instanceof Error ? e.message : String(e);
+  }
+  tab.sftpLoading = false;
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+}
+
+function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
+  const root = document.createElement("div");
+  root.className = "sftp-view";
+
+  // ── Loading / error / closed states ────────────────────────────────────────
+  if (tab.sftpLoading) {
+    root.innerHTML = `<div class="sftp-state-fill"><div class="sftp-spinner"></div><span>Connecting…</span></div>`;
+    return root;
+  }
+  if (tab.closed && !tab.error) {
+    root.innerHTML = `<div class="sftp-state-fill sftp-state-closed">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><line x1="8" y1="8" x2="16" y2="16"/><line x1="16" y1="8" x2="8" y2="16"/></svg>
+      <span>Session closed.</span>
+    </div>`;
+    return root;
+  }
+  if (tab.error) {
+    root.innerHTML = `<div class="sftp-state-fill sftp-state-error">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <span>${escapeHtml(tab.error)}</span>
+    </div>`;
+    return root;
+  }
+
+  // ── Build visible entries list ──────────────────────────────────────────────
+  const allEntries = tab.sftpEntries;
+  const hiddenCount = allEntries.filter((e) => e.name.startsWith(".")).length;
+  const visible = tab.sftpShowHidden
+    ? allEntries
+    : allEntries.filter((e) => !e.name.startsWith("."));
+
+  const selectedEntry = visible.find((e) => e.name === tab.sftpSelected) ?? null;
+
+  // ── Toolbar ─────────────────────────────────────────────────────────────────
+  const toolbar = document.createElement("div");
+  toolbar.className = "sftp-toolbar";
+
+  // Up button
+  const upBtn = document.createElement("button");
+  upBtn.className = "sftp-icon-btn";
+  upBtn.title = "Go up";
+  upBtn.disabled = tab.sftpPath === "/";
+  upBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
+
+  // Breadcrumb
+  const breadcrumb = document.createElement("div");
+  breadcrumb.className = "sftp-breadcrumb";
+  const pathParts = tab.sftpPath.split("/").filter(Boolean);
+  const crumbData: Array<{ label: string; path: string }> = [
+    { label: "/", path: "/" },
+    ...pathParts.map((part, i) => ({
+      label: part,
+      path: "/" + pathParts.slice(0, i + 1).join("/"),
+    })),
+  ];
+  crumbData.forEach((crumb, i) => {
+    const btn = document.createElement("button");
+    btn.className = "sftp-crumb-btn";
+    btn.textContent = crumb.label;
+    btn.dataset.path = crumb.path;
+    if (i === crumbData.length - 1) btn.classList.add("active");
+    breadcrumb.appendChild(btn);
+    if (i < crumbData.length - 1) {
+      const sep = document.createElement("span");
+      sep.className = "sftp-crumb-sep";
+      sep.textContent = "/";
+      breadcrumb.appendChild(sep);
+    }
+  });
+
+  // Hidden toggle
+  const hiddenBtn = document.createElement("button");
+  hiddenBtn.className = `sftp-icon-btn${tab.sftpShowHidden ? " active" : ""}`;
+  hiddenBtn.title = tab.sftpShowHidden ? "Hide hidden files" : "Show hidden files";
+  hiddenBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M1 12S5 4 12 4s11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/>${tab.sftpShowHidden ? "" : '<line x1="3" y1="21" x2="21" y2="3"/>'}</svg>`;
+
+  // Upload button
+  const uploadBtn = document.createElement("button");
+  uploadBtn.className = "sftp-action-btn";
+  uploadBtn.title = "Upload file";
+  uploadBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg> Upload`;
+
+  // Download button
+  const downloadBtn = document.createElement("button");
+  downloadBtn.className = "sftp-action-btn";
+  downloadBtn.disabled = !selectedEntry || selectedEntry.isDir;
+  downloadBtn.title =
+    selectedEntry && !selectedEntry.isDir
+      ? `Download ${selectedEntry.name}`
+      : "Select a file to download";
+  downloadBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><polyline points="19 12 12 19 5 12"/></svg> Download`;
+
+  // Refresh button
+  const refreshBtn = document.createElement("button");
+  refreshBtn.className = "sftp-icon-btn";
+  refreshBtn.title = "Refresh";
+  refreshBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 11-2.1-7.4L23 10"/></svg>`;
+
+  toolbar.append(upBtn, breadcrumb, hiddenBtn, uploadBtn, downloadBtn, refreshBtn);
+
+  // ── Column headers ───────────────────────────────────────────────────────────
+  const colHeader = document.createElement("div");
+  colHeader.className = "sftp-col-header";
+  colHeader.innerHTML = `<span class="sftp-col-name">Name</span><span class="sftp-col-size">Size</span><span class="sftp-col-mtime">Modified</span>`;
+
+  // ── File list ────────────────────────────────────────────────────────────────
+  const list = document.createElement("div");
+  list.className = "sftp-list";
+
+  // Parent ".." row (not shown at root)
+  if (tab.sftpPath !== "/") {
+    const parentRow = document.createElement("div");
+    parentRow.className = "sftp-row sftp-row-parent";
+    parentRow.dataset.name = "..";
+    parentRow.dataset.isdir = "true";
+    parentRow.innerHTML = `
+      <span class="sftp-row-icon">${SFTP_ICON_SVG.folder}</span>
+      <span class="sftp-row-name sftp-row-name--dir">..</span>
+      <span class="sftp-row-size"></span>
+      <span class="sftp-row-mtime"></span>`;
+    list.appendChild(parentRow);
+  }
+
+  if (visible.length === 0 && tab.sftpPath === "/") {
+    const empty = document.createElement("div");
+    empty.className = "sftp-state-fill";
+    empty.innerHTML = `<span style="color:var(--text-muted)">Empty directory</span>`;
+    list.appendChild(empty);
+  }
+
+  for (const entry of visible) {
+    const kind = sftpIconKind(entry);
+    const isSelected = tab.sftpSelected === entry.name;
+    const isHidden = entry.name.startsWith(".");
+    const row = document.createElement("div");
+    row.className =
+      `sftp-row` +
+      (entry.isDir ? " sftp-row--dir" : "") +
+      (entry.isSymlink ? " sftp-row--symlink" : "") +
+      (isSelected ? " sftp-row--selected" : "") +
+      (isHidden ? " sftp-row--hidden" : "");
+    row.dataset.name = entry.name;
+    row.dataset.isdir = String(entry.isDir);
+    row.innerHTML = `
+      <span class="sftp-row-icon">${SFTP_ICON_SVG[kind]}</span>
+      <span class="sftp-row-name${entry.isDir ? " sftp-row-name--dir" : ""}${entry.isSymlink ? " sftp-row-name--symlink" : ""}">${escapeHtml(entry.name)}${entry.isSymlink ? '<span class="sftp-symlink-arrow">→</span>' : ""}</span>
+      <span class="sftp-row-size">${entry.isDir ? "" : formatBytes(entry.size)}</span>
+      <span class="sftp-row-mtime">${formatMtime(entry.mtime)}</span>`;
+    list.appendChild(row);
+  }
+
+  // ── Status bar ───────────────────────────────────────────────────────────────
+  const statusBar = document.createElement("div");
+  statusBar.className = "sftp-status-bar";
+  const itemLabel = `${visible.length} item${visible.length !== 1 ? "s" : ""}`;
+  const hiddenLabel =
+    !tab.sftpShowHidden && hiddenCount > 0 ? `  ·  ${hiddenCount} hidden` : "";
+  const selLabel = selectedEntry
+    ? `  ·  ${escapeHtml(selectedEntry.name)}${selectedEntry.isDir ? "/" : "  " + formatBytes(selectedEntry.size)}`
+    : "";
+  statusBar.innerHTML = `<span>${itemLabel}${hiddenLabel}${selLabel}</span>`;
+
+  root.append(toolbar, colHeader, list, statusBar);
+
+  // ── Event wiring ─────────────────────────────────────────────────────────────
+  upBtn.addEventListener("click", () => {
+    const parent = tab.sftpPath.split("/").slice(0, -1).join("/") || "/";
+    void sftpNavigate(connId, tab.tabId, parent);
+  });
+
+  breadcrumb.querySelectorAll<HTMLButtonElement>(".sftp-crumb-btn").forEach((btn) => {
+    btn.addEventListener("click", () =>
+      sftpNavigate(connId, tab.tabId, btn.dataset.path!),
+    );
+  });
+
+  hiddenBtn.addEventListener("click", () => {
+    tab.sftpShowHidden = !tab.sftpShowHidden;
+    tab.sftpSelected = null;
+    if (selectedId === connId)
+      renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  });
+
+  uploadBtn.addEventListener("click", async () => {
+    if (!tab.sessionId) return;
+    const result = await window.api.sftpUpload(tab.sessionId, tab.sftpPath);
+    if (!result.canceled) void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+  });
+
+  downloadBtn.addEventListener("click", async () => {
+    if (!tab.sessionId || !tab.sftpSelected) return;
+    await window.api.sftpDownload(
+      tab.sessionId,
+      sftpJoin(tab.sftpPath, tab.sftpSelected),
+    );
+  });
+
+  refreshBtn.addEventListener("click", () =>
+    sftpNavigate(connId, tab.tabId, tab.sftpPath),
+  );
+
+  list.querySelectorAll<HTMLElement>(".sftp-row").forEach((row) => {
+    row.addEventListener("click", () => {
+      const name = row.dataset.name!;
+      if (name === "..") return;
+      tab.sftpSelected = tab.sftpSelected === name ? null : name;
+      if (selectedId === connId)
+        renderTerminalDetail(connections.find((c) => c.id === connId)!);
+    });
+    row.addEventListener("dblclick", () => {
+      const name = row.dataset.name!;
+      const isDir = row.dataset.isdir === "true";
+      if (isDir) {
+        const dest =
+          name === ".."
+            ? tab.sftpPath.split("/").slice(0, -1).join("/") || "/"
+            : sftpJoin(tab.sftpPath, name);
+        void sftpNavigate(connId, tab.tabId, dest);
+      } else {
+        if (!tab.sessionId) return;
+        void window.api.sftpDownload(tab.sessionId, sftpJoin(tab.sftpPath, name));
+      }
+    });
+  });
+
+  return root;
+}
+
+function renderTerminalDetail(conn: Connection): void {
+  const state = termState.get(conn.id);
+
+  if (!state || state.tabs.length === 0) {
+    detailPanel.innerHTML = `<div class="detail-empty"><div class="detail-empty-sub">Opening terminal…</div></div>`;
+    return;
+  }
+
+  // Clear the panel (terminal .el divs are kept alive in memory and re-appended).
+  detailPanel.innerHTML = "";
+
+  const view = document.createElement("div");
+  view.className = "terminal-view";
+
+  // Tab bar
+  const tabBar = document.createElement("div");
+  tabBar.className = "term-tab-bar";
+
+  for (const tab of state.tabs) {
+    const tabEl = document.createElement("div");
+    tabEl.className = `term-tab${tab.tabId === state.activeTabId ? " active" : ""}`;
+    tabEl.innerHTML = `<span class="term-tab-label">${escapeHtml(tab.label)}</span><button class="term-tab-close" title="Close tab">×</button>`;
+    tabEl.addEventListener("click", (e) => {
+      if ((e.target as HTMLElement).classList.contains("term-tab-close")) {
+        closeTermTab(conn.id, tab.tabId);
+      } else {
+        switchTermTab(conn.id, tab.tabId);
+      }
+    });
+    tabBar.appendChild(tabEl);
+  }
+
+  const newBtn = document.createElement("button");
+  newBtn.className = "term-new-btn";
+  newBtn.title = "New tab";
+  newBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>`;
+
+  // New-tab dropdown: Terminal or File Transfer
+  newBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const menu = document.createElement("div");
+    menu.style.cssText =
+      "position:fixed;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:9999;min-width:160px;padding:4px 0;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.4)";
+    const rect = newBtn.getBoundingClientRect();
+    menu.style.top = `${rect.bottom + 4}px`;
+    menu.style.left = `${rect.left}px`;
+
+    const item = (label: string, action: () => void) => {
+      const el = document.createElement("div");
+      el.style.cssText = "padding:7px 14px;cursor:pointer;";
+      el.textContent = label;
+      el.addEventListener("mouseenter", () => {
+        el.style.background = "var(--bg-hover)";
+      });
+      el.addEventListener("mouseleave", () => {
+        el.style.background = "";
+      });
+      el.addEventListener("click", () => {
+        document.body.removeChild(menu);
+        action();
+      });
+      menu.appendChild(el);
+    };
+
+    item("Terminal", () => void addTermTab(conn.id, "term"));
+    item("File Transfer (SFTP)", () => void addTermTab(conn.id, "sftp"));
+
+    document.body.appendChild(menu);
+    const dismiss = (ev: MouseEvent) => {
+      if (!menu.contains(ev.target as Node)) {
+        if (document.body.contains(menu)) document.body.removeChild(menu);
+        document.removeEventListener("click", dismiss);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", dismiss), 0);
+  });
+
+  tabBar.appendChild(newBtn);
+  tabBar.appendChild(
+    Object.assign(document.createElement("div"), { className: "term-bar-spacer" }),
+  );
+
+  const barActions = document.createElement("div");
+  barActions.className = "term-bar-actions";
+
+  if (!IS_TERMINAL_WINDOW) {
+    const svgStop = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`;
+    const disconnectBtn = document.createElement("button");
+    disconnectBtn.className = "cmd-btn";
+    disconnectBtn.innerHTML = `${svgStop} Disconnect`;
+    disconnectBtn.addEventListener("click", () => handleAction("disconnect", conn.id));
+    barActions.appendChild(disconnectBtn);
+  }
+  tabBar.appendChild(barActions);
+
+  view.appendChild(tabBar);
+
+  // Panel area — re-attach persistent terminal divs, build sftp panels inline
+  const panelsEl = document.createElement("div");
+  panelsEl.className = "term-panels";
+
+  for (const tab of state.tabs) {
+    if (tab.type === "term") {
+      tab.el.classList.toggle("active", tab.tabId === state.activeTabId);
+      if (tab.closed || tab.error) {
+        tab.el.innerHTML = `<div class="${tab.error ? "term-tab-error" : "term-tab-closed"}">${escapeHtml(tab.error ?? "Connection closed.")}</div>`;
+      }
+      panelsEl.appendChild(tab.el);
+    } else {
+      const sftpEl = renderSftpPanel(conn.id, tab);
+      sftpEl.classList.add("term-panel");
+      sftpEl.classList.toggle("active", tab.tabId === state.activeTabId);
+      panelsEl.appendChild(sftpEl);
+    }
+  }
+
+  view.appendChild(panelsEl);
+  detailPanel.appendChild(view);
+
+  // Fit active terminal after layout settles
+  requestAnimationFrame(() => fitActiveTerminal(conn.id));
+}
+
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
 function renderSidebar() {
@@ -649,6 +1440,7 @@ function renderDetail() {
   const isConnecting = status === "connecting";
 
   const proto = conn.protocol || "rdp-cf";
+
   const isRdpCf = proto === "rdp-cf";
   const rdpIsDown = isConnected && rdpClosed.has(conn.id) && isRdpCf;
   const isCf = proto === "rdp-cf" || proto === "ssh-cf";
@@ -661,12 +1453,18 @@ function renderDetail() {
   const svgTrash = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
   const svgActivity = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
 
+  const isSshOrTelnet = proto === "ssh-cf" || proto === "ssh" || proto === "telnet";
+  const relaunchLabel = proto === "telnet" ? "Relaunch Telnet" : "Open Terminal";
+
   let connectActions = "";
   if (!isConnected && !isConnecting) {
     connectActions = `<button class="cmd-btn cmd-primary" data-action="connect" data-id="${conn.id}">${svgPlay} ${escapeHtml(connectLabel(proto))}</button>`;
   } else if (isConnected) {
     if (rdpClosed.has(conn.id) && isRdpCf) {
       connectActions = `<button class="cmd-btn cmd-primary" data-action="reconnect-rdp" data-id="${conn.id}">${svgRefresh} Reconnect RDP</button>`;
+    }
+    if (isSshOrTelnet) {
+      connectActions += `<button class="cmd-btn" data-action="relaunch-client" data-id="${conn.id}">${svgRefresh} ${escapeHtml(relaunchLabel)}</button>`;
     }
     connectActions += `<button class="cmd-btn" data-action="disconnect" data-id="${conn.id}">${svgStop} Disconnect</button>`;
   } else {
@@ -961,14 +1759,20 @@ async function handleAction(action: string, id: string, value?: string) {
     try {
       showToast(`${label}…`, "info");
       await window.api.connect(id);
-      const successMsg =
-        proto === "http" || proto === "https"
-          ? "Opened in browser."
-          : proto === "ssh" || proto === "telnet"
-            ? `${label} launched.`
-            : "Connected — client launched.";
-      appendLog(`${label} launched — ${connName(id)}`);
-      showToast(successMsg, "success");
+      if (proto === "ssh" || proto === "ssh-cf") {
+        appendLog(`Opening terminal — ${connName(id)}`);
+        showToast("Opening terminal…", "info");
+        void window.api.openTermWindow(id, connName(id));
+      } else {
+        const successMsg =
+          proto === "http" || proto === "https"
+            ? "Opened in browser."
+            : proto === "telnet"
+              ? `${label} launched.`
+              : "Connected — client launched.";
+        appendLog(`${label} launched — ${connName(id)}`);
+        showToast(successMsg, "success");
+      }
     } catch (err) {
       appendLog(`Error: ${errorMsg(err, "Connection failed")} — ${connName(id)}`);
       showToast(errorMsg(err, "Connection failed."), "error");
@@ -1029,6 +1833,23 @@ async function handleAction(action: string, id: string, value?: string) {
       rdpClosed.add(id);
       appendLog(`Reconnect failed: ${errorMsg(err, "Unknown error")} — ${connName(id)}`);
       showToast(errorMsg(err, "Failed to launch Remote Desktop."), "error");
+    }
+  } else if (action === "relaunch-client") {
+    const proto = connections.find((c) => c.id === id)?.protocol ?? "ssh";
+    if (proto === "ssh" || proto === "ssh-cf") {
+      appendLog(`Open terminal — ${connName(id)}`);
+      void window.api.openTermWindow(id, connName(id));
+    } else {
+      const label = proto === "telnet" ? "Telnet" : "SSH terminal";
+      appendLog(`Relaunch ${label} — ${connName(id)}`);
+      try {
+        showToast(`Launching ${label}…`, "info");
+        await window.api.connect(id);
+        showToast(`${label} launched.`, "success");
+      } catch (err) {
+        appendLog(`Relaunch failed: ${errorMsg(err, "Unknown error")} — ${connName(id)}`);
+        showToast(errorMsg(err, `Failed to launch ${label}.`), "error");
+      }
     }
   } else if (action === "toggle-debug") {
     debugMode = !debugMode;
@@ -1247,30 +2068,39 @@ async function refreshConnections() {
 
 // ─── IPC ──────────────────────────────────────────────────────────────────────
 
-window.api.onStatusUpdate((data) => {
-  const prev = statuses[data.id];
-  statuses[data.id] = data.status;
-  if (data.status === "disconnected") {
-    rdpClosed.delete(data.id);
-    if (data.id === selectedId) {
-      stopDebugPoll();
-      if (debugMode) setLiveIndicator("not connected", "dim");
+if (!IS_TERMINAL_WINDOW) {
+  window.api.onStatusUpdate((data) => {
+    const prev = statuses[data.id];
+    statuses[data.id] = data.status;
+    if (data.status === "disconnected") {
+      rdpClosed.delete(data.id);
+      if (data.id === selectedId) {
+        stopDebugPoll();
+        if (debugMode) setLiveIndicator("not connected", "dim");
+      }
+      if (prev === "connecting") appendLog(`Connection failed — ${connName(data.id)}`);
+      else if (prev === "connected")
+        appendLog(`Tunnel disconnected — ${connName(data.id)}`);
+    } else if (data.status === "connected" && prev !== "connected") {
+      appendLog(`Tunnel connected — ${connName(data.id)}`);
     }
-    if (prev === "connecting") appendLog(`Connection failed — ${connName(data.id)}`);
-    else if (prev === "connected")
-      appendLog(`Tunnel disconnected — ${connName(data.id)}`);
-  } else if (data.status === "connected" && prev !== "connected") {
-    appendLog(`Tunnel connected — ${connName(data.id)}`);
-  }
-  renderSidebar();
-  renderDetail();
-});
+    renderSidebar();
+    renderDetail();
+  });
 
-window.api.onRdpClosed((data) => {
-  rdpClosed.add(data.id);
-  appendLog(`RDP window closed — ${connName(data.id)}`);
-  if (data.id === selectedId) renderDetail();
-});
+  window.api.onRdpClosed((data) => {
+    rdpClosed.add(data.id);
+    appendLog(`RDP window closed — ${connName(data.id)}`);
+    if (data.id === selectedId) renderDetail();
+  });
+
+  window.api.onRdpReconnected((data) => {
+    rdpClosed.delete(data.id);
+    appendLog(`RDP reconnected via tunnel — ${connName(data.id)}`);
+    renderSidebar();
+    if (data.id === selectedId) renderDetail();
+  });
+}
 
 window.api.onLog((data) => {
   const name = data.id ? connName(data.id) : null;
@@ -1299,10 +2129,37 @@ depsWarningDismiss.addEventListener("click", () => {
   depsWarning.classList.add("hidden");
 });
 
-window.api.onAuthRequired((data) => {
-  appendLog(`Cloudflare Access login required — ${connName(data.id)}`);
-  showToast("Browser login required — complete sign-in in your browser.", "info");
-  renderDetail();
+if (!IS_TERMINAL_WINDOW) {
+  window.api.onAuthRequired((data) => {
+    appendLog(`Cloudflare Access login required — ${connName(data.id)}`);
+    showToast("Browser login required — complete sign-in in your browser.", "info");
+    renderDetail();
+  });
+}
+
+window.api.onSshData(({ sid, data }) => {
+  const loc = sidToTab.get(sid);
+  if (!loc) return;
+  const state = termState.get(loc.connId);
+  const tab = state?.tabs.find((t) => t.tabId === loc.tabId);
+  if (tab?.term) tab.term.write(atob(data));
+});
+
+window.api.onSshClose(({ sid }) => {
+  const loc = sidToTab.get(sid);
+  if (!loc) return;
+  sidToTab.delete(sid);
+  const state = termState.get(loc.connId);
+  const tab = state?.tabs.find((t) => t.tabId === loc.tabId);
+  if (!tab) return;
+  tab.closed = true;
+  tab.sessionId = null;
+  if (tab.term) tab.term.write("\r\n\x1b[31mConnection closed.\x1b[0m\r\n");
+  appendLog(`SSH session closed — ${connName(loc.connId)}`);
+  if (selectedId === loc.connId) {
+    const conn = connections.find((c) => c.id === loc.connId);
+    if (conn) renderTerminalDetail(conn);
+  }
 });
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -1334,6 +2191,43 @@ window.addEventListener("error", (e) => {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
+const termResizeObserver = new ResizeObserver(() => {
+  if (selectedId) fitActiveTerminal(selectedId);
+});
+termResizeObserver.observe(detailPanel);
+
+// ─── Terminal-only window initializer ─────────────────────────────────────────
+
+async function initTerminalWindow(connId: string): Promise<void> {
+  const root = document.getElementById("term-window-root") as HTMLElement;
+
+  // Show terminal root, hide the main app shell.
+  (document.querySelector(".app") as HTMLElement).style.display = "none";
+  root.classList.remove("hidden");
+
+  // Redirect detailPanel so renderTerminalDetail writes here instead.
+  termResizeObserver.disconnect();
+  detailPanel = root;
+  termResizeObserver.observe(detailPanel);
+
+  // Load connections so renderTerminalDetail has the Connection object.
+  try {
+    connections = await window.api.loadConnections();
+  } catch {}
+
+  const conn = connections.find((c) => c.id === connId);
+  if (!conn) {
+    root.innerHTML = `<div class="detail-empty"><div class="detail-empty-sub">Connection not found.</div></div>`;
+    return;
+  }
+
+  document.title = `${conn.friendlyName || conn.hostname} — Terminal`;
+  selectedId = connId;
+  await addTermTab(connId, "term");
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────────────
+
 async function init() {
   try {
     currentSettings = await window.api.getSettings();
@@ -1341,4 +2235,8 @@ async function init() {
   await refreshConnections();
 }
 
-init();
+if (TERM_WIN_CONN_ID) {
+  void initTerminalWindow(TERM_WIN_CONN_ID);
+} else {
+  init();
+}

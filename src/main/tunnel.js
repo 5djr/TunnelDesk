@@ -162,8 +162,22 @@ async function startCloudflared(connection, password, cfBinaryPath) {
   updateStatus(connection.id, "connecting");
 
   proc.on("exit", () => {
-    updateStatus(connection.id, "disconnected");
-    activeConnections.delete(connection.id);
+    const entry = activeConnections.get(connection.id);
+    const mstscAlive = entry && entry.mstscProc && entry.mstscProc.exitCode === null;
+    if (mstscAlive) {
+      // Cloudflare Access session expired but the RDP window is still open.
+      // Keep "connected" so the user isn't confused — the session will drop
+      // naturally once the server side times out. The mstsc exit handler below
+      // will do the final cleanup when the window eventually closes.
+      sendConnectionLog(
+        connection.id,
+        "Cloudflare tunnel closed — your RDP session may remain active until the server disconnects.",
+      );
+      entry.proc = null;
+    } else {
+      updateStatus(connection.id, "disconnected");
+      activeConnections.delete(connection.id);
+    }
   });
 
   proc.on("error", (error) => {

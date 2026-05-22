@@ -3,6 +3,92 @@ const { spawn } = require("child_process");
 const { activeConnections } = require("./state");
 const { safeSend, sendConnectionLog, updateStatus } = require("./messaging");
 
+// ─── External RDP watcher ─────────────────────────────────────────────────────
+// After the tracked mstsc exits (while cloudflared is still alive), poll netstat
+// so we notice if the user opens their own Remote Desktop and connects through
+// the still-running tunnel. Clears the "RDP Disconnected" UI state automatically.
+
+const rdpWatchers = new Map(); // connectionId -> setTimeout handle
+
+function checkRdpActive(port) {
+  return new Promise((resolve) => {
+    const proc = spawn("netstat", ["-n", "-p", "TCP"], {
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      if (out.length < 65536) out += d.toString();
+    });
+    proc.on("close", () => {
+      // Match 127.0.0.1:<port> (not followed by another digit) on an ESTABLISHED line.
+      const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
+      const found = out
+        .split("\n")
+        .some((line) => portRe.test(line) && line.includes("ESTABLISHED"));
+      resolve(found);
+    });
+    proc.on("error", () => resolve(false));
+  });
+}
+
+function stopRdpWatcher(connectionId) {
+  const t = rdpWatchers.get(connectionId);
+  if (t !== undefined) {
+    clearTimeout(t);
+    rdpWatchers.delete(connectionId);
+  }
+}
+
+function startRdpWatcher(connectionId, port) {
+  stopRdpWatcher(connectionId);
+
+  const poll = async () => {
+    const entry = activeConnections.get(connectionId);
+    // Stop if cloudflared is gone or a tracked mstsc process took over.
+    const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
+    if (!cfAlive) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+    if (entry.mstscProc && entry.mstscProc.exitCode === null) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+
+    const isActive = await checkRdpActive(port);
+
+    // Re-check after the async netstat call — state may have changed.
+    const e = activeConnections.get(connectionId);
+    const stillCf = e && e.proc && e.proc.exitCode === null;
+    if (!stillCf) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+    if (e.mstscProc && e.mstscProc.exitCode === null) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+
+    if (!e.rdpOpen && isActive) {
+      // External RDP client connected through the tunnel.
+      e.rdpOpen = true;
+      e.mstscProc = null;
+      sendConnectionLog(connectionId, "External RDP client connected through tunnel.");
+      safeSend("rdp-reconnected", { id: connectionId });
+    } else if (e.rdpOpen && !isActive) {
+      // External RDP client disconnected — show "RDP Disconnected" again.
+      e.rdpOpen = false;
+      safeSend("rdp-closed", { id: connectionId });
+    }
+
+    // Keep watching until cloudflared dies or a tracked mstsc takes over.
+    rdpWatchers.set(connectionId, setTimeout(poll, 2000));
+  };
+
+  rdpWatchers.set(connectionId, setTimeout(poll, 2000));
+}
+
 function runCmdkey(args) {
   return new Promise((resolve) => {
     const proc = spawn("cmdkey", args, { windowsHide: true, stdio: "ignore" });
@@ -34,6 +120,8 @@ async function storeCredential(port, username, password) {
 }
 
 async function launchRemoteDesktop(port, connectionId, username, password) {
+  stopRdpWatcher(connectionId); // cancel any pending external-connection poll
+
   if (username && password) {
     await storeCredential(port, username, password);
   }
@@ -49,7 +137,18 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
   mstsc.on("exit", () => {
     const entry = activeConnections.get(connectionId);
     if (entry) entry.rdpOpen = false;
-    safeSend("rdp-closed", { id: connectionId });
+    const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
+    if (cfAlive) {
+      // Tunnel still running — notify renderer so the "Reconnect RDP" button appears,
+      // then start watching for an external mstsc that connects through the tunnel.
+      safeSend("rdp-closed", { id: connectionId });
+      startRdpWatcher(connectionId, entry.connection.port);
+    } else {
+      // Tunnel is also gone (e.g. CF Access session expired). Skip the transient
+      // "RDP Disconnected" flash and go straight to a clean disconnected state.
+      activeConnections.delete(connectionId);
+      updateStatus(connectionId, "disconnected");
+    }
   });
 
   mstsc.on("error", () => {
@@ -82,8 +181,10 @@ async function launchRemoteDesktopDirect(connection, password) {
   if (active) active.mstscProc = mstsc;
 
   mstsc.on("exit", () => {
-    activeConnections.delete(connection.id);
-    updateStatus(connection.id, "disconnected");
+    // Don't auto-disconnect — mstsc can exit immediately when it hands off to an
+    // already-running Remote Desktop window. The user controls lifecycle via Disconnect.
+    const entry = activeConnections.get(connection.id);
+    if (entry) entry.mstscProc = null;
   });
 
   mstsc.on("error", () => {
