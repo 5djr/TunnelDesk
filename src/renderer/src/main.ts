@@ -1678,7 +1678,7 @@ function renderSettingsPanel() {
             <span class="settings-desc">Leave empty to use cloudflared from your system PATH. Useful for corporate tools directories.</span>
           </div>
           <div class="form-file-row" style="margin-top:8px">
-            <input class="form-input" type="text" id="s-cf-path" placeholder="${window.api.platform === "win32" ? "e.g. C:\\\\tools\\\\cloudflared.exe" : "e.g. /usr/local/bin/cloudflared"}" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
+            <input class="form-input" type="text" id="s-cf-path" placeholder="${window.api.platform === "win32" ? "e.g. C:\\tools\\cloudflared.exe" : "e.g. /usr/local/bin/cloudflared"}" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
             <button type="button" class="btn btn-secondary btn-sm" id="s-cf-browse">Browse</button>
             <button type="button" class="btn btn-ghost btn-sm" id="s-cf-clear" title="Reset to PATH">&times;</button>
           </div>
@@ -1716,9 +1716,15 @@ function renderSettingsPanel() {
   document.getElementById("s-cf-browse")!.addEventListener("click", async () => {
     const isWin = window.api.platform === "win32";
     const filters = isWin
-      ? [{ name: "Executable", extensions: ["exe"] }, { name: "All Files", extensions: ["*"] }]
+      ? [
+          { name: "Executable", extensions: ["exe"] },
+          { name: "All Files", extensions: ["*"] },
+        ]
       : [{ name: "All Files", extensions: ["*"] }];
-    const picked = await window.api.pickFile({ title: "Select cloudflared executable", filters });
+    const picked = await window.api.pickFile({
+      title: "Select cloudflared executable",
+      filters,
+    });
     if (picked) cfPathInput.value = picked;
   });
   document.getElementById("s-cf-clear")!.addEventListener("click", () => {

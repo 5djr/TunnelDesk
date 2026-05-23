@@ -7,9 +7,7 @@ const IS_LINUX = process.platform === "linux";
 function checkBinary(name) {
   return new Promise((resolve) => {
     const cmd = IS_WIN ? "where" : "which";
-    const opts = IS_WIN
-      ? { windowsHide: true, stdio: "ignore" }
-      : { stdio: "ignore" };
+    const opts = IS_WIN ? { windowsHide: true, stdio: "ignore" } : { stdio: "ignore" };
     const proc = spawn(cmd, [name], opts);
     proc.on("close", (code) => resolve(code === 0));
     proc.on("error", () => resolve(false));
@@ -34,8 +32,8 @@ async function checkDependencies() {
   ]);
   return {
     cloudflared,
-    mstsc: rdp.found,         // kept for backward compat with renderer
-    rdpClient: rdp.binary,    // actual binary name used in error messages
+    mstsc: rdp.found, // kept for backward compat with renderer
+    rdpClient: rdp.binary, // actual binary name used in error messages
     rdpClientFound: rdp.found,
   };
 }

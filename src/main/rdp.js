@@ -78,12 +78,7 @@ async function findRdpBinary() {
 // and v3 (/cert:ignore), so we adapt based on which binary was found.
 function buildXfreeRdpArgs(host, port, username, password, binary) {
   const certFlag = binary === "xfreerdp" ? "/cert-ignore" : "/cert:ignore";
-  const args = [
-    `/v:${host}:${port}`,
-    certFlag,
-    "/dynamic-resolution",
-    "+clipboard",
-  ];
+  const args = [`/v:${host}:${port}`, certFlag, "/dynamic-resolution", "+clipboard"];
   if (username) args.push(`/u:${username}`);
   if (password) args.push(`/p:${password}`);
   return args;
@@ -306,11 +301,9 @@ async function launchRemoteDesktopDirect(connection, password) {
 
   let rdpProc;
   if (IS_WIN) {
-    rdpProc = spawn(
-      "mstsc",
-      [`/v:${connection.hostname}:${connection.port}`],
-      { stdio: "ignore" },
-    );
+    rdpProc = spawn("mstsc", [`/v:${connection.hostname}:${connection.port}`], {
+      stdio: "ignore",
+    });
   } else {
     const rdpBin = await findRdpBinary();
     if (!rdpBin) {
@@ -358,7 +351,10 @@ async function launchSshClient(hostname, port, username, connectionId, sshKeyPat
   if (sshKeyPath && sshKeyPath.trim()) {
     const keyPath = sshKeyPath.trim();
     if (!fs.existsSync(keyPath)) {
-      sendConnectionLog(connectionId, `SSH key not found: ${keyPath} — connecting without key.`);
+      sendConnectionLog(
+        connectionId,
+        `SSH key not found: ${keyPath} — connecting without key.`,
+      );
     } else {
       sshArgs.push("-i", keyPath);
     }
@@ -366,11 +362,9 @@ async function launchSshClient(hostname, port, username, connectionId, sshKeyPat
   sshArgs.push("-p", String(port), target);
 
   if (IS_WIN) {
-    const proc = spawn(
-      "cmd",
-      ["/c", "start", `SSH — ${hostname}`, "ssh", ...sshArgs],
-      { windowsHide: true },
-    );
+    const proc = spawn("cmd", ["/c", "start", `SSH — ${hostname}`, "ssh", ...sshArgs], {
+      windowsHide: true,
+    });
     proc.on("error", () => {
       sendConnectionLog(
         connectionId,
