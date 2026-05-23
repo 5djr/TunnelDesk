@@ -1,6 +1,9 @@
 const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("api", {
+  // Static value — renderer uses this to adapt platform-specific UI text.
+  platform: process.platform,
+
   loadConnections: () => ipcRenderer.invoke("load-connections"),
   saveConnection: (connection) => ipcRenderer.invoke("save-connection", connection),
   deleteConnection: (id) => ipcRenderer.invoke("delete-connection", id),

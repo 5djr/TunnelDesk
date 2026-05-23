@@ -1,14 +1,15 @@
 {
   "name": "tunneldesk",
   "productName": "TunnelDesk",
-  "version": "0.1.1",
-  "description": "Cloudflare Zero Trust RDP connection manager for Windows",
+  "version": "0.1.2",
+  "description": "Cloudflare Zero Trust connection manager for Windows and Linux",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
     "build:renderer": "vite build",
     "dev": "npm run build:renderer && electron .",
-    "dist": "npm run build:renderer && electron-builder --win --x64"
+    "dist": "npm run build:renderer && electron-builder --win --x64",
+    "dist:linux": "npm run build:renderer && electron-builder --linux --x64"
   },
   "build": {
     "appId": "com.tunneldesk.app",
@@ -53,6 +54,15 @@
       "shortcutName": "TunnelDesk",
       "runAfterFinish": true
     },
+    "linux": {
+      "target": [
+        { "target": "AppImage", "arch": ["x64", "arm64"] },
+        { "target": "deb", "arch": ["x64", "arm64"] }
+      ],
+      "icon": "assets/icon.png",
+      "category": "Network",
+      "description": "Cloudflare Zero Trust connection manager"
+    },
     "asar": true,
     "asarUnpack": []
   },
@@ -71,7 +81,9 @@
     "electron",
     "cloudflare",
     "rdp",
-    "windows"
+    "ssh",
+    "windows",
+    "linux"
   ],
   "author": "TunnelDesk",
   "license": "MIT"

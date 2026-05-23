@@ -93,6 +93,7 @@ interface ConnTermState {
 declare global {
   interface Window {
     api: {
+      platform: string;
       loadConnections(): Promise<Connection[]>;
       saveConnection(conn: {
         id?: string;
@@ -146,7 +147,14 @@ declare global {
       onSshClose(
         cb: (d: { sid: string; code: number | null; signal: string | null }) => void,
       ): void;
-      onDepsStatus(cb: (data: { cloudflared: boolean; mstsc: boolean }) => void): void;
+      onDepsStatus(
+        cb: (data: {
+          cloudflared: boolean;
+          mstsc: boolean;
+          rdpClient?: string;
+          rdpClientFound?: boolean;
+        }) => void,
+      ): void;
       onAuthRequired(cb: (data: { id: string; url: string }) => void): void;
     };
   }
@@ -1670,7 +1678,7 @@ function renderSettingsPanel() {
             <span class="settings-desc">Leave empty to use cloudflared from your system PATH. Useful for corporate tools directories.</span>
           </div>
           <div class="form-file-row" style="margin-top:8px">
-            <input class="form-input" type="text" id="s-cf-path" placeholder="e.g. C:\\tools\\cloudflared.exe" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
+            <input class="form-input" type="text" id="s-cf-path" placeholder="${window.api.platform === "win32" ? "e.g. C:\\\\tools\\\\cloudflared.exe" : "e.g. /usr/local/bin/cloudflared"}" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
             <button type="button" class="btn btn-secondary btn-sm" id="s-cf-browse">Browse</button>
             <button type="button" class="btn btn-ghost btn-sm" id="s-cf-clear" title="Reset to PATH">&times;</button>
           </div>
@@ -1706,13 +1714,11 @@ function renderSettingsPanel() {
 
   const cfPathInput = document.getElementById("s-cf-path") as HTMLInputElement;
   document.getElementById("s-cf-browse")!.addEventListener("click", async () => {
-    const picked = await window.api.pickFile({
-      title: "Select cloudflared executable",
-      filters: [
-        { name: "Executable", extensions: ["exe"] },
-        { name: "All Files", extensions: ["*"] },
-      ],
-    });
+    const isWin = window.api.platform === "win32";
+    const filters = isWin
+      ? [{ name: "Executable", extensions: ["exe"] }, { name: "All Files", extensions: ["*"] }]
+      : [{ name: "All Files", extensions: ["*"] }];
+    const picked = await window.api.pickFile({ title: "Select cloudflared executable", filters });
     if (picked) cfPathInput.value = picked;
   });
   document.getElementById("s-cf-clear")!.addEventListener("click", () => {
@@ -2111,7 +2117,13 @@ window.api.onLog((data) => {
 window.api.onDepsStatus((deps) => {
   const missing: string[] = [];
   if (!deps.cloudflared) missing.push("cloudflared");
-  if (!deps.mstsc) missing.push("mstsc (Remote Desktop)");
+
+  const isWin = window.api.platform === "win32";
+  const rdpClientName = deps.rdpClient ?? (isWin ? "mstsc" : "xfreerdp");
+  const rdpLabel = isWin
+    ? "mstsc (Remote Desktop)"
+    : `${rdpClientName} (FreeRDP — install with: sudo apt install freerdp2-x11)`;
+  if (!deps.mstsc) missing.push(rdpLabel);
 
   if (missing.length > 0) {
     const list = missing.join(" and ");

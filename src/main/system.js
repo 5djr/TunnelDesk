@@ -1,25 +1,47 @@
+const fs = require("fs");
 const { spawn } = require("child_process");
+
+const IS_WIN = process.platform === "win32";
+const IS_LINUX = process.platform === "linux";
 
 function checkBinary(name) {
   return new Promise((resolve) => {
-    const proc = spawn("where", [name], { windowsHide: true, stdio: "ignore" });
+    const cmd = IS_WIN ? "where" : "which";
+    const opts = IS_WIN
+      ? { windowsHide: true, stdio: "ignore" }
+      : { stdio: "ignore" };
+    const proc = spawn(cmd, [name], opts);
     proc.on("close", (code) => resolve(code === 0));
     proc.on("error", () => resolve(false));
   });
 }
 
-async function checkDependencies() {
-  const [cloudflared, mstsc] = await Promise.all([
-    checkBinary("cloudflared"),
-    checkBinary("mstsc"),
-  ]);
-  return { cloudflared, mstsc };
+// On Linux, prefer xfreerdp3 (FreeRDP v3) then fall back to xfreerdp (v2).
+async function findRdpClientBinary() {
+  if (IS_WIN) {
+    return { binary: "mstsc", found: await checkBinary("mstsc") };
+  }
+  for (const bin of ["xfreerdp3", "xfreerdp"]) {
+    if (await checkBinary(bin)) return { binary: bin, found: true };
+  }
+  return { binary: "xfreerdp", found: false };
 }
 
-// Returns the working-set memory (bytes) of a Windows process via tasklist.
-// Uses only a built-in Windows command so no extra npm packages are needed.
-function getProcessMemoryBytes(pid) {
-  if (!pid) return Promise.resolve(null);
+async function checkDependencies() {
+  const [cloudflared, rdp] = await Promise.all([
+    checkBinary("cloudflared"),
+    findRdpClientBinary(),
+  ]);
+  return {
+    cloudflared,
+    mstsc: rdp.found,         // kept for backward compat with renderer
+    rdpClient: rdp.binary,    // actual binary name used in error messages
+    rdpClientFound: rdp.found,
+  };
+}
+
+// ─── Process memory — Windows ─────────────────────────────────────────────────
+function getProcessMemoryBytesWindows(pid) {
   return new Promise((resolve) => {
     const proc = spawn("tasklist", ["/fi", `PID eq ${pid}`, "/fo", "csv", "/nh"], {
       windowsHide: true,
@@ -37,7 +59,6 @@ function getProcessMemoryBytes(pid) {
       if (!line) return resolve(null);
       const parts = line.split(",");
       if (parts.length < 5) return resolve(null);
-      // Field 4 looks like: "50,000 K"
       const kb = parseInt(
         parts[4]
           .replace(/"/g, "")
@@ -51,7 +72,26 @@ function getProcessMemoryBytes(pid) {
   });
 }
 
-// Runs `cloudflared --version` once at startup.
+// ─── Process memory — Linux ───────────────────────────────────────────────────
+// Reads VmRSS from /proc/<pid>/status — no external command needed.
+function getProcessMemoryBytesLinux(pid) {
+  return new Promise((resolve) => {
+    fs.readFile(`/proc/${pid}/status`, "utf8", (err, data) => {
+      if (err) return resolve(null);
+      const match = data.match(/^VmRSS:\s+(\d+)\s+kB/m);
+      resolve(match ? parseInt(match[1]) * 1024 : null);
+    });
+  });
+}
+
+function getProcessMemoryBytes(pid) {
+  if (!pid) return Promise.resolve(null);
+  if (IS_WIN) return getProcessMemoryBytesWindows(pid);
+  if (IS_LINUX) return getProcessMemoryBytesLinux(pid);
+  return Promise.resolve(null);
+}
+
+// ─── cloudflared version ──────────────────────────────────────────────────────
 function fetchCloudflaredVersion() {
   return new Promise((resolve) => {
     let proc;
@@ -61,10 +101,10 @@ function fetchCloudflaredVersion() {
       } catch {}
       resolve(null);
     }, 5000);
-    proc = spawn("cloudflared", ["--version"], {
-      windowsHide: true,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
+    const spawnOpts = IS_WIN
+      ? { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
+      : { stdio: ["ignore", "pipe", "pipe"] };
+    proc = spawn("cloudflared", ["--version"], spawnOpts);
     let out = "";
     proc.stdout.on("data", (d) => {
       out += d.toString();
@@ -86,6 +126,7 @@ function fetchCloudflaredVersion() {
 
 module.exports = {
   checkBinary,
+  findRdpClientBinary,
   checkDependencies,
   getProcessMemoryBytes,
   fetchCloudflaredVersion,

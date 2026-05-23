@@ -68,7 +68,9 @@ async function rebuildMenu() {
 function createTray(connectFn, disconnectFn) {
   _connectFn = connectFn;
   _disconnectFn = disconnectFn;
-  const iconPath = path.join(__dirname, "..", "..", "assets", "icon.ico");
+  // Linux/macOS don't support .ico — use the PNG instead.
+  const iconFile = process.platform === "win32" ? "icon.ico" : "icon.png";
+  const iconPath = path.join(__dirname, "..", "..", "assets", iconFile);
   tray = new Tray(iconPath);
   tray.setToolTip("TunnelDesk");
   tray.on("double-click", showWindow);

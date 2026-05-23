@@ -51,22 +51,25 @@ app.on("before-quit", () => {
       } catch {}
     }
     // Remove any RDP credentials stored in Windows Credential Manager so they
-    // don't persist after the app exits.
-    const proto = active.connection && (active.connection.protocol || "rdp-cf");
-    if (proto === "rdp-cf" || proto === "rdp") {
-      const port = active.connection.port;
-      try {
-        spawnSync("cmdkey", [`/delete:TERMSRV/localhost:${port}`], {
-          windowsHide: true,
-          stdio: "ignore",
-        });
-        if (port === 3389) {
-          spawnSync("cmdkey", ["/delete:TERMSRV/localhost"], {
+    // don't persist after the app exits. cmdkey is Windows-only; on Linux,
+    // xfreerdp receives credentials as CLI args so nothing needs cleanup.
+    if (process.platform === "win32") {
+      const proto = active.connection && (active.connection.protocol || "rdp-cf");
+      if (proto === "rdp-cf" || proto === "rdp") {
+        const port = active.connection.port;
+        try {
+          spawnSync("cmdkey", [`/delete:TERMSRV/localhost:${port}`], {
             windowsHide: true,
             stdio: "ignore",
           });
-        }
-      } catch {}
+          if (port === 3389) {
+            spawnSync("cmdkey", ["/delete:TERMSRV/localhost"], {
+              windowsHide: true,
+              stdio: "ignore",
+            });
+          }
+        } catch {}
+      }
     }
   }
   activeConnections.clear();
