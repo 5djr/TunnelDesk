@@ -102,7 +102,13 @@ function fetchCloudflaredVersion() {
     const spawnOpts = IS_WIN
       ? { windowsHide: true, stdio: ["ignore", "pipe", "pipe"] }
       : { stdio: ["ignore", "pipe", "pipe"] };
-    proc = spawn("cloudflared", ["--version"], spawnOpts);
+    try {
+      proc = spawn("cloudflared", ["--version"], spawnOpts);
+    } catch {
+      clearTimeout(timer);
+      resolve(null);
+      return;
+    }
     let out = "";
     proc.stdout.on("data", (d) => {
       out += d.toString();

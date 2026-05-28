@@ -74,6 +74,15 @@ function waitForCloudflaredReady(proc, id) {
       clearTimeout(timeout); // wait for real "ready" after login, not the fallback
       openAuthUrl(id, url);
       sendConnectionLog(id, "Waiting for browser authentication…");
+      // Post-auth fallback: if cloudflared never prints a ready signal after login,
+      // assume it is connected after 45 s rather than hanging indefinitely.
+      timeout = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          cleanup();
+          resolve();
+        }
+      }, 45000);
     };
 
     const onStdout = (chunk) => {
@@ -94,9 +103,13 @@ function waitForCloudflaredReady(proc, id) {
       const line = text.trim();
       if (line) sendConnectionLog(id, line);
       handleAuthUrl(text);
+      // Exclude JSON log lines where "error" appears as a null field (e.g. cloudflared
+      // structured logs emit {"error":null,...} on every healthy startup line).
+      const isJsonNullError = /"error"\s*:\s*null/i.test(text);
       if (
         !settled &&
-        /(error|failed|forbidden|denied|not installed|address already in use|conflict)/i.test(
+        !isJsonNullError &&
+        /(\berror\b|failed|forbidden|denied|not installed|address already in use|conflict)/i.test(
           text,
         )
       ) {
@@ -186,7 +199,8 @@ async function startCloudflared(connection, password, cfBinaryPath) {
 
   await waitForCloudflaredReady(proc, connection.id);
   const entry = activeConnections.get(connection.id);
-  if (entry) entry.connectedAt = Date.now();
+  if (!entry) return proc; // stopConnection was called while we were waiting
+  entry.connectedAt = Date.now();
   updateStatus(connection.id, "connected");
   return proc;
 }

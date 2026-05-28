@@ -331,6 +331,9 @@ async function launchRemoteDesktopDirect(connection, password) {
   rdpProc.on("exit", () => {
     const entry = activeConnections.get(connection.id);
     if (entry) entry.mstscProc = null;
+    sendConnectionLog(connection.id, "RDP session closed.");
+    activeConnections.delete(connection.id);
+    updateStatus(connection.id, "disconnected");
   });
 
   rdpProc.on("error", () => {
@@ -340,7 +343,10 @@ async function launchRemoteDesktopDirect(connection, password) {
     updateStatus(connection.id, "disconnected");
   });
 
-  updateStatus(connection.id, "connected");
+  // Only mark connected if the process hasn't already exited (e.g. spawn error).
+  if (rdpProc.exitCode === null) {
+    updateStatus(connection.id, "connected");
+  }
 }
 
 // ─── SSH external client (fallback, not used for embedded terminal) ───────────

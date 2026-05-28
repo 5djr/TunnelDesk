@@ -113,7 +113,7 @@ function parseTelnet(session, raw) {
     // NOP (241), DM (242), GA (249), EL (248), EC (247), etc. — silently skip
   }
 
-  if (responses.length > 0) {
+  if (responses.length > 0 && session.socket.writable) {
     try {
       session.socket.write(Buffer.from(responses));
     } catch {}

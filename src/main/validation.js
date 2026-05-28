@@ -18,9 +18,10 @@ function normalizePort(value) {
 function sanitizeHostname(value) {
   const s = String(value || "").trim();
   if (!s || s.length > 253) return "";
-  // Allow only RFC 1123 hostname characters plus dot, hyphen, colon (IPv6), brackets.
-  // Reject anything that is a shell metacharacter on Windows (& | ^ ; ` " ' etc.).
-  if (/[^a-zA-Z0-9.\-:[\]_]/.test(s)) return "";
+  // Allow RFC 1123 hostname characters, dot, hyphen, colon (IPv6), brackets,
+  // and % (IPv6 zone IDs like [fe80::1%eth0]).
+  // Reject shell metacharacters on Windows (& | ^ ; ` " ' etc.).
+  if (/[^a-zA-Z0-9.\-:[\]_%]/.test(s)) return "";
   return s;
 }
 

@@ -18,10 +18,11 @@ async function readConnections() {
   }
 }
 
-// Atomic write: write to a temp file then rename to prevent corruption on crash.
+// Atomic write: write to a per-call temp file then rename so that concurrent
+// saves don't clobber each other's temp file before the rename completes.
 async function writeConnections(connections) {
   const file = configPath();
-  const tmp = file + ".tmp";
+  const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await fs.writeFile(tmp, JSON.stringify(connections, null, 2), "utf8");
   await fs.rename(tmp, file);
 }

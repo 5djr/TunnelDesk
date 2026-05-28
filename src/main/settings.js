@@ -34,6 +34,7 @@ async function readSettings() {
 }
 
 async function writeSettings(partial) {
+  if (!partial || typeof partial !== "object") return readSettings();
   const current = await readSettings();
   // Only accept known keys with validated types to prevent arbitrary key injection.
   const safe = {};
@@ -58,9 +59,10 @@ async function writeSettings(partial) {
     );
   }
   const merged = { ...current, ...safe };
-  const tmp = settingsPath() + ".tmp";
+  const file = settingsPath();
+  const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await fs.writeFile(tmp, JSON.stringify(merged, null, 2), "utf8");
-  await fs.rename(tmp, settingsPath());
+  await fs.rename(tmp, file);
   return merged;
 }
 

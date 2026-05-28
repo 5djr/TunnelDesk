@@ -108,7 +108,7 @@ function createTermSession(connectionId, cfg, onData, onClose) {
       untrackPending(connectionId, client);
       client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
         if (err) {
-          client.end();
+          try { client.destroy(); } catch {}
           reject(new Error(friendlySshError(err)));
           return;
         }
@@ -177,10 +177,14 @@ function createSftpSession(connectionId, cfg, onClose) {
           connectionId,
           type: "sftp",
         });
-        client.on("close", () => {
-          sessions.delete(sid);
-          onClose(sid);
-        });
+        const cleanup = () => {
+          if (sessions.has(sid)) {
+            sessions.delete(sid);
+            onClose(sid);
+          }
+        };
+        client.on("close", cleanup);
+        sftp.on("close", cleanup);
         resolve(sid);
       });
     });
@@ -218,7 +222,11 @@ function sshWrite(sid, data) {
 
 function sshResize(sid, cols, rows) {
   const s = sessions.get(sid);
-  if (s && s.stream) s.stream.setWindow(rows, cols, 0, 0);
+  if (s && s.stream) {
+    try {
+      s.stream.setWindow(rows, cols, 0, 0);
+    } catch {}
+  }
 }
 
 function sshCloseSession(sid) {

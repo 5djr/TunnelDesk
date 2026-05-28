@@ -39,7 +39,7 @@ async function rebuildMenu() {
             if (_connectFn) await _connectFn(conn.id);
           }
         } catch {}
-        rebuildMenu();
+        void rebuildMenu();
       },
     };
   });

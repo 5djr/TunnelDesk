@@ -365,6 +365,29 @@ body {
   flex-shrink: 0;
 }
 
+/* ─── Auth banner ──────────────────────────────────────── */
+.auth-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  background: rgba(249, 168, 37, 0.08);
+  border: 1px solid rgba(249, 168, 37, 0.25);
+  border-radius: var(--radius);
+  font-size: 13px;
+  color: var(--connecting);
+  line-height: 1.4;
+}
+
+.auth-banner svg {
+  flex-shrink: 0;
+}
+
+.auth-banner-text {
+  flex: 1;
+}
+
 .detail-status-pill.connected .status-dot {
   box-shadow: 0 0 4px currentColor;
 }

@@ -318,13 +318,16 @@ function registerIpcHandlers() {
   ipcMain.handle("ssh-report-status", (_event, { connId, ok }) => {
     if (ok) {
       const entry = activeConnections.get(connId);
-      if (entry) {
-        if (!entry.connectedAt) entry.connectedAt = Date.now();
+      // Guard: only accept the first success report — a stale sshReportStatus(true)
+      // from an old terminal window must not stamp a freshly-reconnecting session.
+      if (entry && entry.connectedAt === null) {
+        entry.connectedAt = Date.now();
         updateStatus(connId, "connected");
       }
     } else {
       activeConnections.delete(connId);
       updateStatus(connId, "disconnected");
+      sendConnectionLog(connId, "Connection failed.");
     }
   });
 

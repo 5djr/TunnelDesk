@@ -130,6 +130,7 @@ declare global {
       openLogFolder(): Promise<void>;
       openExternal(url: string): Promise<void>;
       openTermWindow(connId: string, label: string): Promise<void>;
+      openFormWindow(connId?: string | null): Promise<void>;
       sshReportStatus(connId: string, ok: boolean): Promise<void>;
       onStatusUpdate(cb: (data: { id: string; status: ConnectionStatus }) => void): void;
       onLog(cb: (data: { id?: string; message: string }) => void): void;
@@ -176,6 +177,7 @@ declare global {
         }) => void,
       ): void;
       onAuthRequired(cb: (data: { id: string; url: string }) => void): void;
+      onConnectionSaved(cb: () => void): void;
     };
   }
 }
@@ -185,6 +187,7 @@ declare global {
 let connections: Connection[] = [];
 const statuses: Record<string, ConnectionStatus> = {};
 const rdpClosed = new Set<string>();
+const authPendingUrls = new Map<string, string>(); // connectionId -> auth URL
 let selectedId: string | null = null;
 let debugMode = false;
 let debugPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -859,7 +862,9 @@ function showDropdownMenu(x: number, y: number, items: MenuEntry[]): void {
     if (rect.bottom > window.innerHeight)
       menu.style.top = `${Math.max(0, y - rect.height)}px`;
   });
-  setTimeout(() => document.addEventListener("mousedown", onOut), 0);
+  setTimeout(() => {
+    if (document.body.contains(menu)) document.addEventListener("mousedown", onOut);
+  }, 0);
 }
 
 // Lightweight prompt dialog (window.prompt is blocked in sandboxed Electron).
@@ -1015,7 +1020,12 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       }
       if (e.key === "V") {
         void navigator.clipboard.readText().then((text) => {
-          if (text && tab.sessionId) void window.api.sshWrite(tab.sessionId, text);
+          if (text && tab.sessionId) {
+            const sid = tab.sessionId;
+            void (telnetSids.has(sid)
+              ? window.api.telnetWrite(sid, text)
+              : window.api.sshWrite(sid, text));
+          }
         });
         return false;
       }
@@ -1038,7 +1048,12 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
           label: "Paste",
           action: () => {
             void navigator.clipboard.readText().then((text) => {
-              if (text && tab.sessionId) void window.api.sshWrite(tab.sessionId, text);
+              if (text && tab.sessionId) {
+                const sid = tab.sessionId;
+                void (telnetSids.has(sid)
+                  ? window.api.telnetWrite(sid, text)
+                  : window.api.sshWrite(sid, text));
+              }
             });
           },
         },
@@ -1075,8 +1090,10 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
   }
 
   // Render the shell immediately (tab bar appears, session shows loading state).
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
 
   // For ssh-direct and telnet, the main process leaves status at "connecting"
   // until we confirm the session succeeded or failed via ssh-report-status.
@@ -1142,8 +1159,10 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       void window.api.sshReportStatus(connId, false);
   }
 
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
 }
 
 function closeTermTab(connId: string, tabId: string): void {
@@ -1173,7 +1192,7 @@ function closeTermTab(connId: string, tabId: string): void {
     tab.cancelled = true;
     void window.api.cancelSshConnect(connId);
     const proto = connections.find((c) => c.id === connId)?.protocol;
-    if (proto === "ssh") void window.api.sshReportStatus(connId, false);
+    if (proto === "ssh" || proto === "telnet") void window.api.sshReportStatus(connId, false);
   }
   tab.term?.dispose();
   state.tabs = state.tabs.filter((t) => t.tabId !== tabId);
@@ -1201,8 +1220,10 @@ function switchTermTab(connId: string, tabId: string): void {
   const state = termState.get(connId);
   if (!state) return;
   state.activeTabId = tabId;
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
 }
 
 function fitActiveTerminal(connId: string): void {
@@ -1242,13 +1263,17 @@ function closeAllTermTabs(connId: string): void {
 function setSftpStatus(connId: string, tab: TermTab, msg: string, ms = 3000) {
   if (tab.sftpStatusTimer !== null) clearTimeout(tab.sftpStatusTimer);
   tab.sftpStatus = msg;
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
   tab.sftpStatusTimer = setTimeout(() => {
     tab.sftpStatus = null;
     tab.sftpStatusTimer = null;
-    if (selectedId === connId)
-      renderTerminalDetail(connections.find((c) => c.id === connId)!);
+    if (selectedId === connId) {
+      const c = connections.find((c) => c.id === connId);
+      if (c) renderTerminalDetail(c);
+    }
   }, ms);
 }
 
@@ -1263,8 +1288,10 @@ async function sftpNavigate(
   if (!tab || !tab.sessionId || tab.type !== "sftp") return;
   tab.sftpLoading = true;
   tab.error = null;
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
   try {
     const entries = await window.api.sftpList(tab.sessionId, newPath);
     tab.sftpPath = newPath;
@@ -1274,8 +1301,10 @@ async function sftpNavigate(
     tab.error = e instanceof Error ? e.message : String(e);
   }
   tab.sftpLoading = false;
-  if (selectedId === connId)
-    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  if (selectedId === connId) {
+    const c = connections.find((c) => c.id === connId);
+    if (c) renderTerminalDetail(c);
+  }
 }
 
 function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
@@ -1518,8 +1547,10 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   hiddenBtn.addEventListener("click", () => {
     tab.sftpShowHidden = !tab.sftpShowHidden;
     tab.sftpSelected = null;
-    if (selectedId === connId)
-      renderTerminalDetail(connections.find((c) => c.id === connId)!);
+    if (selectedId === connId) {
+      const c = connections.find((c) => c.id === connId);
+      if (c) renderTerminalDetail(c);
+    }
   });
 
   newFolderBtn.addEventListener("click", async () => {
@@ -1569,8 +1600,10 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
       const name = row.dataset.name!;
       if (name === "..") return;
       tab.sftpSelected = tab.sftpSelected === name ? null : name;
-      if (selectedId === connId)
-        renderTerminalDetail(connections.find((c) => c.id === connId)!);
+      if (selectedId === connId) {
+        const c = connections.find((c) => c.id === connId);
+        if (c) renderTerminalDetail(c);
+      }
     });
     row.addEventListener("dblclick", () => {
       const name = row.dataset.name!;
@@ -1595,8 +1628,10 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
       if (!entry) return;
       // Select the right-clicked entry
       tab.sftpSelected = name;
-      if (selectedId === connId)
-        renderTerminalDetail(connections.find((c) => c.id === connId)!);
+      if (selectedId === connId) {
+        const c = connections.find((c) => c.id === connId);
+        if (c) renderTerminalDetail(c);
+      }
 
       showDropdownMenu(e.clientX, e.clientY, [
         {
@@ -1735,7 +1770,9 @@ function renderTerminalDetail(conn: Connection): void {
         document.removeEventListener("click", dismiss);
       }
     };
-    setTimeout(() => document.addEventListener("click", dismiss), 0);
+    setTimeout(() => {
+      if (document.body.contains(menu)) document.addEventListener("click", dismiss);
+    }, 0);
   });
 
   tabBar.appendChild(newBtn);
@@ -1937,6 +1974,7 @@ function renderDetail() {
   const rdpIsDown = isConnected && rdpClosed.has(conn.id) && isRdpCf;
   const isCf = proto === "rdp-cf" || proto === "ssh-cf";
   const endpoint = isCf ? `localhost:${conn.port}` : `${conn.hostname}:${conn.port}`;
+  const authUrl = isConnecting ? authPendingUrls.get(conn.id) : undefined;
 
   const svgPlay = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;
   const svgStop = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 6.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>`;
@@ -1960,7 +1998,7 @@ function renderDetail() {
     }
     connectActions += `<button class="cmd-btn" data-action="disconnect" data-id="${conn.id}">${svgStop} Disconnect</button>`;
   } else {
-    connectActions = `<button class="cmd-btn" disabled><span class="spinner"></span> Connecting&hellip;</button>`;
+    connectActions = `<button class="cmd-btn" disabled><span class="spinner"></span> Connecting&hellip;</button><button class="cmd-btn cmd-danger" data-action="disconnect" data-id="${conn.id}">${svgStop} Cancel</button>`;
   }
 
   const credValue = conn.username
@@ -2004,6 +2042,16 @@ function renderDetail() {
       <div class="cmd-separator"></div>
       <button class="cmd-btn cmd-debug${debugMode ? " active" : ""}" data-action="toggle-debug" data-id="${conn.id}">${svgActivity} Debug</button>
     </div>
+
+    ${
+      authUrl
+        ? `<div class="auth-banner">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <span class="auth-banner-text">Cloudflare Access login required — sign in via your browser to continue.</span>
+        <button class="cmd-btn" data-action="open-auth-url" data-id="${conn.id}" data-value="${escapeHtml(authUrl)}">Open Browser</button>
+      </div>`
+        : ""
+    }
 
     <div class="prop-section-label">Details</div>
     <div class="prop-list">
@@ -2287,6 +2335,8 @@ async function handleAction(action: string, id: string, value?: string) {
     try {
       const name = connName(id);
       connections = await window.api.deleteConnection(id);
+      authPendingUrls.delete(id);
+      rdpClosed.delete(id);
       if (selectedId === id) {
         debugMode = false;
         stopDebugPoll();
@@ -2318,13 +2368,17 @@ async function handleAction(action: string, id: string, value?: string) {
     debugMode = !debugMode;
     renderDetail();
   } else if (action === "copy-endpoint") {
-    const endpoint = value || localEndpoint(connections.find((c) => c.id === id)!);
+    const conn = connections.find((c) => c.id === id);
+    if (!conn) return;
+    const endpoint = value || localEndpoint(conn);
     try {
       await navigator.clipboard.writeText(endpoint);
       showToast(`Copied ${endpoint}`, "success");
     } catch {
       showToast("Failed to copy.", "error");
     }
+  } else if (action === "open-auth-url") {
+    if (value) void window.api.openExternal(value);
   } else if (action === "open-cloudflared-docs") {
     window.api.openExternal(
       "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/",
@@ -2588,6 +2642,7 @@ if (!IS_TERMINAL_WINDOW) {
     statuses[data.id] = data.status;
     if (data.status === "disconnected") {
       rdpClosed.delete(data.id);
+      authPendingUrls.delete(data.id);
       if (data.id === selectedId) {
         stopDebugPoll();
         if (debugMode) setLiveIndicator("not connected", "dim");
@@ -2596,6 +2651,7 @@ if (!IS_TERMINAL_WINDOW) {
       else if (prev === "connected")
         appendLog(`Tunnel disconnected — ${connName(data.id)}`);
     } else if (data.status === "connected" && prev !== "connected") {
+      authPendingUrls.delete(data.id);
       appendLog(`Tunnel connected — ${connName(data.id)}`);
     }
     renderSidebar();
@@ -2651,9 +2707,10 @@ depsWarningDismiss.addEventListener("click", () => {
 
 if (!IS_TERMINAL_WINDOW) {
   window.api.onAuthRequired((data) => {
+    authPendingUrls.set(data.id, data.url);
     appendLog(`Cloudflare Access login required — ${connName(data.id)}`);
     showToast("Browser login required — complete sign-in in your browser.", "info");
-    renderDetail();
+    if (data.id === selectedId) renderDetail();
   });
 }
 
