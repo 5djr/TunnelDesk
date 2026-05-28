@@ -97,6 +97,7 @@ function registerIpcHandlers() {
     }
 
     const protocol = sanitizeProtocol(connection.protocol);
+    const jumpHost = sanitizeHostname(connection.jumpHost || "");
     const normalized = {
       id: connection.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
       friendlyName: String(connection.friendlyName || connection.hostname || "")
@@ -111,6 +112,9 @@ function registerIpcHandlers() {
       notes: sanitizeNotes(connection.notes),
       group: sanitizeGroup(connection.group),
       sshKeyPath: sanitizePath(connection.sshKeyPath),
+      jumpHost: jumpHost || undefined,
+      jumpPort: jumpHost ? normalizePort(connection.jumpPort || 22) : undefined,
+      temp: !!connection.temp,
     };
 
     const existingIndex = connections.findIndex((item) => item.id === normalized.id);
@@ -405,13 +409,82 @@ function registerIpcHandlers() {
     const { BrowserWindow } = require("electron");
     const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
     const filename = remotePath.split("/").pop() || "file";
-    const result = await dialog.showSaveDialog(win, {
-      title: "Save File",
-      defaultPath: filename,
-    });
+    const settings = await readSettings();
+    const defaultPath = settings.sftpDownloadFolder
+      ? path.join(settings.sftpDownloadFolder, filename)
+      : filename;
+    const result = await dialog.showSaveDialog(win, { title: "Save File", defaultPath });
     if (result.canceled) return { canceled: true };
     await sftpDownload(sid, remotePath, result.filePath);
     return { filePath: result.filePath };
+  });
+
+  ipcMain.handle("export-connections", async (event) => {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
+    const result = await dialog.showSaveDialog(win, {
+      title: "Export Connections",
+      defaultPath: "tunneldesk-connections.json",
+      filters: [{ name: "JSON Files", extensions: ["json"] }],
+    });
+    if (result.canceled) return { canceled: true };
+    const conns = await readConnections();
+    // Strip encrypted credential fields — they're DPAPI-bound to this machine.
+    const exported = conns.map(
+      // eslint-disable-next-line no-unused-vars
+      ({ encryptedPassword, encryptedSshKeyPassphrase, ...rest }) => rest,
+    );
+    const fsP = require("fs").promises;
+    await fsP.writeFile(result.filePath, JSON.stringify(exported, null, 2), "utf8");
+    return { count: exported.length };
+  });
+
+  ipcMain.handle("import-connections", async (event) => {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
+    const result = await dialog.showOpenDialog(win, {
+      title: "Import Connections",
+      filters: [{ name: "JSON Files", extensions: ["json"] }],
+      properties: ["openFile"],
+    });
+    if (result.canceled || !result.filePaths.length) return { canceled: true };
+    const fsP = require("fs").promises;
+    let parsed;
+    try {
+      parsed = JSON.parse(await fsP.readFile(result.filePaths[0], "utf8"));
+    } catch {
+      throw new Error(
+        "Could not read the file — make sure it is a valid TunnelDesk export.",
+      );
+    }
+    if (!Array.isArray(parsed)) throw new Error("Invalid file format.");
+    const existing = await readConnections();
+    const existingIds = new Set(existing.map((c) => c.id));
+    let added = 0;
+    for (const conn of parsed) {
+      const hostname = sanitizeHostname(conn.hostname);
+      if (!hostname) continue;
+      const id =
+        conn.id && typeof conn.id === "string" && !existingIds.has(conn.id)
+          ? conn.id
+          : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      existing.push({
+        id,
+        friendlyName: String(conn.friendlyName || hostname).trim().slice(0, 128),
+        hostname,
+        port: normalizePort(conn.port || 3389),
+        username: sanitizeUsername(conn.username),
+        protocol: sanitizeProtocol(conn.protocol),
+        notes: sanitizeNotes(conn.notes),
+        group: sanitizeGroup(conn.group),
+        sshKeyPath: sanitizePath(conn.sshKeyPath),
+      });
+      existingIds.add(id);
+      added++;
+    }
+    await writeConnections(existing);
+    safeSend("connection-saved");
+    return { added };
   });
 
   ipcMain.handle("sftp-delete", (_event, { sid, remotePath, isDir }) => {
@@ -445,6 +518,52 @@ function registerIpcHandlers() {
     const dest = remotePath.replace(/\/?$/, "/") + filename;
     await sftpUpload(sid, localPath, dest);
     return { dest };
+  });
+
+  ipcMain.handle("show-notification", (_event, { title, body }) => {
+    const { Notification } = require("electron");
+    if (Notification.isSupported()) {
+      new Notification({
+        title: String(title || "TunnelDesk").slice(0, 128),
+        body: String(body || "").slice(0, 256),
+        silent: true,
+      }).show();
+    }
+  });
+
+  ipcMain.handle("test-http", async (_event, { url }) => {
+    const { URL: NodeURL } = require("url");
+    let parsed;
+    try {
+      parsed = new NodeURL(url);
+    } catch {
+      throw new Error("Invalid URL");
+    }
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
+      throw new Error("Only http and https are supported");
+    const mod = parsed.protocol === "https:" ? require("https") : require("http");
+    return new Promise((resolve) => {
+      const start = Date.now();
+      const req = mod.request(
+        { hostname: parsed.hostname, port: parsed.port || undefined, path: parsed.pathname || "/", method: "HEAD", timeout: 8000 },
+        (res) => {
+          res.resume();
+          resolve({ statusCode: res.statusCode, timeMs: Date.now() - start });
+        },
+      );
+      req.on("timeout", () => { req.destroy(); resolve({ statusCode: null, timeMs: Date.now() - start, error: "Timeout" }); });
+      req.on("error", (e) => resolve({ statusCode: null, timeMs: Date.now() - start, error: e.message }));
+      req.end();
+    });
+  });
+
+  ipcMain.handle("delete-temp-connections", async () => {
+    const connections = await readConnections();
+    const remaining = connections.filter((c) => !c.temp);
+    if (remaining.length !== connections.length) {
+      await writeConnections(remaining);
+      updateTrayMenu();
+    }
   });
 }
 

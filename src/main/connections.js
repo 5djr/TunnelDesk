@@ -69,6 +69,9 @@ function sanitizeForRenderer(conn) {
     sshKeyPath: conn.sshKeyPath || "",
     hasSshKey: !!conn.sshKeyPath,
     hasSshKeyPassphrase: !!conn.encryptedSshKeyPassphrase,
+    jumpHost: conn.jumpHost || "",
+    jumpPort: conn.jumpPort ? normalizePort(conn.jumpPort) : null,
+    temp: !!conn.temp,
   };
 }
 

@@ -63,6 +63,11 @@ contextBridge.exposeInMainWorld("api", {
   sshResize: (sid, cols, rows) => ipcRenderer.invoke("ssh-resize", { sid, cols, rows }),
   sshCloseSession: (sid) => ipcRenderer.invoke("ssh-close-session", sid),
   cancelSshConnect: (connId) => ipcRenderer.invoke("cancel-ssh-connect", connId),
+  exportConnections: () => ipcRenderer.invoke("export-connections"),
+  importConnections: () => ipcRenderer.invoke("import-connections"),
+  showNotification: (title, body) => ipcRenderer.invoke("show-notification", { title, body }),
+  testHttp: (url) => ipcRenderer.invoke("test-http", { url }),
+  deleteTempConnections: () => ipcRenderer.invoke("delete-temp-connections"),
 
   // ─── SFTP ────────────────────────────────────────────────────────────────
   sftpList: (sid, remotePath) => ipcRenderer.invoke("sftp-list", { sid, remotePath }),

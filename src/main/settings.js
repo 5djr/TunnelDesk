@@ -8,6 +8,12 @@ const DEFAULTS = {
   minimizeToTray: true,
   startMinimized: false,
   logRetentionDays: 30,
+  pinnedIds: [],
+  sftpDownloadFolder: "",
+  theme: "dark",
+  connectionOrder: [],
+  autoReconnect: true,
+  autoReconnectAttempts: 3,
 };
 
 const VALID_PROTOCOLS = new Set([
@@ -57,6 +63,26 @@ async function writeSettings(partial) {
       1,
       Math.min(365, Math.floor(partial.logRetentionDays)),
     );
+  }
+  if (Array.isArray(partial.pinnedIds)) {
+    safe.pinnedIds = partial.pinnedIds.filter((x) => typeof x === "string").slice(0, 500);
+  }
+  if (typeof partial.sftpDownloadFolder === "string") {
+    safe.sftpDownloadFolder = partial.sftpDownloadFolder.trim().slice(0, 512);
+  }
+  if (["dark", "light", "system"].includes(partial.theme)) {
+    safe.theme = partial.theme;
+  }
+  if (Array.isArray(partial.connectionOrder)) {
+    safe.connectionOrder = partial.connectionOrder
+      .filter((x) => typeof x === "string")
+      .slice(0, 2000);
+  }
+  if (typeof partial.autoReconnect === "boolean") {
+    safe.autoReconnect = partial.autoReconnect;
+  }
+  if (typeof partial.autoReconnectAttempts === "number") {
+    safe.autoReconnectAttempts = Math.max(1, Math.min(10, Math.floor(partial.autoReconnectAttempts)));
   }
   const merged = { ...current, ...safe };
   const file = settingsPath();

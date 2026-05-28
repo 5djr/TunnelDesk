@@ -67,7 +67,7 @@ function buildConnectConfig(connection, password, keyPassphrase) {
       cfg.privateKey = fs.readFileSync(connection.sshKeyPath.trim());
       if (keyPassphrase) cfg.passphrase = keyPassphrase;
     } catch {
-      // Key file missing — fall through to password auth.
+      cfg._keyMissing = true; // key path configured but file unreadable
     }
   }
   if (password) cfg.password = password;
@@ -123,6 +123,14 @@ function createTermSession(connectionId, cfg, onData, onClose) {
         });
         stream.on("data", (d) => onData(sid, d));
         stream.stderr.on("data", (d) => onData(sid, d));
+        if (cfg._keyMissing) {
+          onData(
+            sid,
+            Buffer.from(
+              "\r\n\x1b[33mWarning: SSH key file not found — using password authentication.\x1b[0m\r\n",
+            ),
+          );
+        }
         stream.on("close", (code, signal) => {
           sessions.delete(sid);
           onClose(sid, code, signal);
@@ -151,9 +159,55 @@ function createTermSession(connectionId, cfg, onData, onClose) {
   });
 }
 
+function openJumpProxy(connection, password, keyPassphrase) {
+  return new Promise((resolve, reject) => {
+    const jumpClient = new Client();
+    const jumpCfg = {
+      host: connection.jumpHost,
+      port: connection.jumpPort || 22,
+      username: (connection.username && connection.username.trim()) || os.userInfo().username,
+      password,
+      readyTimeout: 20000,
+      tryKeyboard: true,
+    };
+    if (connection.sshKeyPath && connection.sshKeyPath.trim()) {
+      try {
+        jumpCfg.privateKey = fs.readFileSync(connection.sshKeyPath.trim());
+        if (keyPassphrase) jumpCfg.passphrase = keyPassphrase;
+      } catch {}
+    }
+    jumpClient.on("ready", () => {
+      const targetHost = connection.protocol === "ssh-cf" ? "127.0.0.1" : connection.hostname;
+      jumpClient.forwardOut("127.0.0.1", 0, targetHost, connection.port || 22, (err, stream) => {
+        if (err) {
+          jumpClient.end();
+          reject(new Error(`Jump host tunnel failed: ${err.message}`));
+          return;
+        }
+        resolve({ stream, jumpClient });
+      });
+    });
+    jumpClient.on("keyboard-interactive", (_n, _i, _l, prompts, finish) => {
+      finish(prompts.map(() => password || ""));
+    });
+    jumpClient.on("error", (err) => {
+      reject(new Error(`Jump host error: ${friendlySshError(err)}`));
+    });
+    jumpClient.connect(jumpCfg);
+  });
+}
+
 async function sshCreateTerm(connectionId, onData, onClose) {
   const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
-  const cfg = buildConnectConfig(connection, password, keyPassphrase);
+  let cfg = buildConnectConfig(connection, password, keyPassphrase);
+  if (connection.jumpHost) {
+    const { stream: sock, jumpClient } = await openJumpProxy(connection, password, keyPassphrase);
+    cfg = { ...cfg, sock };
+    return createTermSession(connectionId, cfg, onData, (sid, code, signal) => {
+      try { jumpClient.end(); } catch {}
+      onClose(sid, code, signal);
+    });
+  }
   return createTermSession(connectionId, cfg, onData, onClose);
 }
 
@@ -211,7 +265,15 @@ function createSftpSession(connectionId, cfg, onClose) {
 
 async function sshCreateSftp(connectionId, onClose) {
   const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
-  const cfg = buildConnectConfig(connection, password, keyPassphrase);
+  let cfg = buildConnectConfig(connection, password, keyPassphrase);
+  if (connection.jumpHost) {
+    const { stream: sock, jumpClient } = await openJumpProxy(connection, password, keyPassphrase);
+    cfg = { ...cfg, sock };
+    return createSftpSession(connectionId, cfg, (sid) => {
+      try { jumpClient.end(); } catch {}
+      onClose(sid);
+    });
+  }
   return createSftpSession(connectionId, cfg, onClose);
 }
 
@@ -219,7 +281,7 @@ async function sshCreateSftp(connectionId, onClose) {
 
 function sshWrite(sid, data) {
   const s = sessions.get(sid);
-  if (s && s.stream) s.stream.write(data);
+  if (s && s.stream && s.stream.writable) s.stream.write(data);
 }
 
 function sshResize(sid, cols, rows) {
@@ -234,13 +296,18 @@ function sshResize(sid, cols, rows) {
 function sshCloseSession(sid) {
   const s = sessions.get(sid);
   if (!s) return;
+  sessions.delete(sid);
   try {
     if (s.stream) s.stream.end();
   } catch {}
   try {
     s.client.end();
   } catch {}
-  sessions.delete(sid);
+  setTimeout(() => {
+    try {
+      s.client.destroy();
+    } catch {}
+  }, 5000);
 }
 
 // ─── SFTP operations ──────────────────────────────────────────────────────────
