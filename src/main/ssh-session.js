@@ -108,7 +108,9 @@ function createTermSession(connectionId, cfg, onData, onClose) {
       untrackPending(connectionId, client);
       client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
         if (err) {
-          try { client.destroy(); } catch {}
+          try {
+            client.destroy();
+          } catch {}
           reject(new Error(friendlySshError(err)));
           return;
         }

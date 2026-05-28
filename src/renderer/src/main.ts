@@ -1192,7 +1192,8 @@ function closeTermTab(connId: string, tabId: string): void {
     tab.cancelled = true;
     void window.api.cancelSshConnect(connId);
     const proto = connections.find((c) => c.id === connId)?.protocol;
-    if (proto === "ssh" || proto === "telnet") void window.api.sshReportStatus(connId, false);
+    if (proto === "ssh" || proto === "telnet")
+      void window.api.sshReportStatus(connId, false);
   }
   tab.term?.dispose();
   state.tabs = state.tabs.filter((t) => t.tabId !== tabId);
