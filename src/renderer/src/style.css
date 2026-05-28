@@ -120,8 +120,8 @@ body {
   align-items: center;
   gap: 8px;
   margin: 0 8px 4px;
-  padding: 8px 10px;
-  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  border-radius: 0;
   background: transparent;
   color: var(--text);
   border: none;
@@ -135,10 +135,11 @@ body {
 
 .nav-new-btn:hover {
   background: var(--bg-hover);
+  border-radius: var(--radius-sm);
 }
 
 .nav-new-btn svg {
-  color: var(--text-label);
+  color: var(--text);
   flex-shrink: 0;
 }
 
@@ -162,11 +163,12 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 10px;
+  padding: 7px 10px 7px 8px;
   border-radius: var(--radius-sm);
   cursor: pointer;
   transition: background 0.1s;
   margin-bottom: 2px;
+  border-left: 2px solid transparent;
 }
 
 .tunnel-item:hover {
@@ -175,6 +177,7 @@ body {
 
 .tunnel-item.active {
   background: var(--bg-active);
+  border-left-color: rgba(255, 255, 255, 0.35);
 }
 
 /* Server icon with overlay status badge */
@@ -415,12 +418,13 @@ body {
 }
 
 .cmd-btn.cmd-primary {
-  background: var(--bg-active);
+  background: rgba(108, 203, 95, 0.1);
+  color: #7dcc70;
   font-weight: 500;
 }
 
 .cmd-btn.cmd-primary:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.13);
+  background: rgba(108, 203, 95, 0.18);
 }
 
 .cmd-btn.cmd-danger {
@@ -463,17 +467,24 @@ body {
 }
 
 .prop-list {
-  border-top: 1px solid var(--border-subtle);
+  background: rgba(255, 255, 255, 0.025);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius);
+  overflow: hidden;
   margin-bottom: 24px;
 }
 
 .prop-row {
   display: flex;
   align-items: center;
-  padding: 10px 0;
+  padding: 10px 14px;
   border-bottom: 1px solid var(--border-subtle);
   gap: 16px;
   min-height: 38px;
+}
+
+.prop-row:last-child {
+  border-bottom: none;
 }
 
 .prop-label {
@@ -586,10 +597,36 @@ body {
   border-color: rgba(248, 81, 73, 0.35);
 }
 
+/* ─── Log resize handle ───────────────────────────────── */
+.log-resize-handle {
+  height: 4px;
+  background: transparent;
+  cursor: ns-resize;
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  position: relative;
+  transition: background 0.15s;
+}
+
+.log-resize-handle::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 12px;
+  cursor: ns-resize;
+}
+
+.log-resize-handle:hover,
+.log-resize-handle.dragging {
+  background: var(--accent, #60a5fa);
+  opacity: 0.5;
+}
+
 /* ─── Log Panel ───────────────────────────────────────── */
 .log-panel {
   height: 168px;
-  border-top: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   background: var(--nav);
@@ -1923,4 +1960,41 @@ body {
 
 .term-window-root.hidden {
   display: none;
+}
+
+/* ─── Form window root ────────────────────────────────── */
+
+.form-window-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+}
+
+.form-window-root.hidden {
+  display: none;
+}
+
+.form-window-root .modal {
+  width: 100%;
+  max-width: none;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+  transform: none !important;
+}
+
+body.form-window-mode .modal-header {
+  -webkit-app-region: drag;
+  cursor: grab;
+}
+
+body.form-window-mode .modal-title,
+body.form-window-mode .modal-close {
+  -webkit-app-region: no-drag;
+}
+
+body.form-window-mode .modal-close {
+  cursor: pointer;
 }

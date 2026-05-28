@@ -4,14 +4,10 @@ const { decryptPassword } = require("./crypto");
 const { readSettings } = require("./settings");
 const { activeConnections } = require("./state");
 const { startCloudflared, stopConnection } = require("./tunnel");
-const {
-  launchRemoteDesktop,
-  launchRemoteDesktopDirect,
-  launchSshClient,
-  launchTelnetClient,
-} = require("./rdp");
+const { launchRemoteDesktop, launchRemoteDesktopDirect } = require("./rdp");
 const { sendConnectionLog, updateStatus } = require("./messaging");
 const { closeSessionsForConnection } = require("./ssh-session");
+const { closeTelnetSessionsForConnection } = require("./telnet-session");
 
 async function connectById(connectionId) {
   const connections = await readConnections();
@@ -52,10 +48,10 @@ async function connectById(connectionId) {
       proc: null,
       connection,
       password,
-      connectedAt: Date.now(),
+      connectedAt: null, // set by terminal window via ssh-report-status IPC
     });
-    await launchTelnetClient(connection.hostname, connection.port, connection.id);
-    updateStatus(connection.id, "connected");
+    // Status transitions to "connected" / "disconnected" when the terminal
+    // window successfully opens the embedded Telnet session (see ssh-report-status).
   } else if (protocol === "http" || protocol === "https") {
     const url = `${protocol}://${connection.hostname}:${connection.port}`;
     await shell.openExternal(url);
@@ -67,6 +63,7 @@ async function connectById(connectionId) {
 
 async function disconnectById(connectionId) {
   closeSessionsForConnection(connectionId);
+  closeTelnetSessionsForConnection(connectionId);
   await stopConnection(connectionId);
   return { status: "disconnected" };
 }

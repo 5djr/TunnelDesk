@@ -119,6 +119,7 @@
 
         <div class="detail-panel" id="detail-panel"></div>
 
+        <div class="log-resize-handle" id="log-resize-handle"></div>
         <div class="log-panel">
           <div class="log-header">
             <span>Activity</span>
@@ -270,6 +271,16 @@
                 &times;
               </button>
             </div>
+            <label class="form-label" for="ssh-key-passphrase" style="margin-top: 10px"
+              >Key Passphrase <span class="form-optional">optional</span></label
+            >
+            <input
+              class="form-input"
+              type="password"
+              id="ssh-key-passphrase"
+              placeholder="Leave empty if key has no passphrase"
+              autocomplete="new-password"
+            />
           </div>
           <div class="form-group">
             <label class="form-label" for="conn-notes"
@@ -325,6 +336,9 @@
 
     <!-- Terminal-only window root — visible only in ?mode=terminal windows -->
     <div id="term-window-root" class="term-window-root hidden"></div>
+
+    <!-- Form window root — visible only in ?mode=form windows -->
+    <div id="form-window-root" class="form-window-root hidden"></div>
 
     <script type="module" src="./src/main.ts"></script>
   </body>

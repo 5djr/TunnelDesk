@@ -5,6 +5,47 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-05-28
+
+### Added
+
+- Embedded Telnet terminal — replaced external telnet launcher with a full xterm.js terminal using Node.js `net.Socket` and RFC 854 IAC negotiation; reuses the same SSH terminal UI (tabs, reconnect, font zoom, copy/paste, right-click menu)
+- IAC option negotiation: accepts ECHO and SGA; negotiates NAWS (window-size updates on resize) and TTYPE (`xterm-256color`); rejects all other options per RFC 854
+- SSH key passphrase support — `encryptedSshKeyPassphrase` stored encrypted in `connections.json`; passphrase input shown in the connection form for SSH protocols
+- SFTP file operations — right-click context menu on file rows with **Download**, **Rename**, and **Delete** actions; **New Folder** button in the SFTP toolbar
+- Terminal reconnect button — when an SSH session closes, a "Reconnect" button is rendered in the closed tab
+- Terminal font zoom — `Ctrl++`/`Ctrl+-` changes font size per tab; `Ctrl+0` resets to default; also available in the right-click context menu
+- Terminal copy/paste shortcuts — `Ctrl+Shift+C` copies selection; `Ctrl+Shift+V` pastes clipboard to the stream
+- Terminal right-click context menu — Copy / Paste / Zoom options
+- SFTP right-click context menu — Download / Rename / Delete for selected file rows
+
+### Fixed
+
+- SSH direct connections now correctly report "Disconnected" when all terminal tabs are closed (was staying "Connected" indefinitely)
+- Passphrase-related SSH errors now surface a friendly "SSH key is passphrase-protected" message instead of a raw authentication error
+- SFTP "File Transfer" tab option hidden for Telnet connections (only shown for `ssh` and `ssh-cf` protocols)
+
+## [0.1.3] - 2026-05-23
+
+### Fixed
+
+- Cloudflared path placeholder on Windows used a forward-slash separator — corrected to `C:\path\to\cloudflared.exe`
+- Various Prettier formatting fixes across main-process files
+
+## [0.1.2] - 2026-05-23
+
+### Added
+
+- Linux support — full cross-platform operation on Ubuntu, Kali, Debian, and compatible distros
+- RDP via `xfreerdp3` (FreeRDP v3) with fallback to `xfreerdp` (v2) on Linux
+- Linux terminal emulator auto-detection for SSH/Telnet (`x-terminal-emulator`, `gnome-terminal`, `konsole`, `qterminal`, `xfce4-terminal`, `lxterminal`, `xterm`)
+- AppImage and `.deb` build targets for Linux (x64 and arm64) via `npm run dist:linux`
+
+### Changed
+
+- Platform-aware dependency warning in the UI — shows Linux-specific install instructions when running on Linux
+- Tray icon uses `icon.ico` on Windows and `icon.png` on Linux
+
 ## [0.1.1] - 2026-05-22
 
 ### Added

@@ -7,11 +7,21 @@ const {
   sshWrite,
   sshResize,
   sshCloseSession,
+  cancelPendingConnections,
   sftpList,
   sftpHome,
   sftpDownload,
   sftpUpload,
+  sftpDelete,
+  sftpRename,
+  sftpMkdir,
 } = require("./ssh-session");
+const {
+  telnetCreateTerm,
+  telnetWrite,
+  telnetResize,
+  telnetCloseSession,
+} = require("./telnet-session");
 const {
   state,
   activeConnections,
@@ -71,6 +81,21 @@ function registerIpcHandlers() {
       encryptedPassword = undefined;
     }
 
+    let encryptedSshKeyPassphrase;
+    if (connection.sshKeyPassphrase) {
+      encryptedSshKeyPassphrase = encryptPassword(
+        String(connection.sshKeyPassphrase).slice(0, 256),
+      );
+    } else if (
+      connection.keepExistingSshKeyPassphrase &&
+      existing &&
+      existing.encryptedSshKeyPassphrase
+    ) {
+      encryptedSshKeyPassphrase = existing.encryptedSshKeyPassphrase;
+    } else {
+      encryptedSshKeyPassphrase = undefined;
+    }
+
     const protocol = sanitizeProtocol(connection.protocol);
     const normalized = {
       id: connection.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -81,6 +106,7 @@ function registerIpcHandlers() {
       port: normalizePort(connection.port || PROTOCOL_DEFAULTS[protocol]),
       username: sanitizeUsername(connection.username),
       encryptedPassword,
+      encryptedSshKeyPassphrase,
       protocol,
       notes: sanitizeNotes(connection.notes),
       group: sanitizeGroup(connection.group),
@@ -95,6 +121,7 @@ function registerIpcHandlers() {
     }
 
     await writeConnections(connections);
+    safeSend("connection-saved");
     updateTrayMenu();
     return sanitizeForRenderer(normalized);
   });
@@ -267,6 +294,12 @@ function registerIpcHandlers() {
     return { status: "opened" };
   });
 
+  ipcMain.handle("open-form-window", (_event, { connId } = {}) => {
+    const { createFormWindow } = require("./window");
+    createFormWindow(connId || null);
+    return { status: "opened" };
+  });
+
   ipcMain.handle("open-external", async (event, url) => {
     if (typeof url !== "string") return;
     try {
@@ -293,6 +326,33 @@ function registerIpcHandlers() {
       activeConnections.delete(connId);
       updateStatus(connId, "disconnected");
     }
+  });
+
+  // ─── SSH terminal ──────────────────────────────────────────────────────────
+
+  // ─── Telnet terminal ──────────────────────────────────────────────────────
+  // Reuses the same ssh-data / ssh-close renderer events so the terminal tab
+  // system works identically to SSH — routing is done via the sid Map.
+
+  ipcMain.handle("telnet-term-create", async (_event, connectionId) => {
+    return telnetCreateTerm(
+      connectionId,
+      (id, data) =>
+        safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
+      (id) => safeSend("ssh-close", { sid: id, code: null, signal: null }),
+    );
+  });
+
+  ipcMain.handle("telnet-write", (_event, { sid, data }) => {
+    telnetWrite(sid, data);
+  });
+
+  ipcMain.handle("telnet-resize", (_event, { sid, cols, rows }) => {
+    telnetResize(sid, cols, rows);
+  });
+
+  ipcMain.handle("telnet-close-session", (_event, sid) => {
+    telnetCloseSession(sid);
   });
 
   // ─── SSH terminal ──────────────────────────────────────────────────────────
@@ -324,6 +384,10 @@ function registerIpcHandlers() {
     sshCloseSession(sid);
   });
 
+  ipcMain.handle("cancel-ssh-connect", (_event, connectionId) => {
+    cancelPendingConnections(connectionId);
+  });
+
   // ─── SFTP operations ───────────────────────────────────────────────────────
 
   ipcMain.handle("sftp-list", (_event, { sid, remotePath }) => {
@@ -345,6 +409,24 @@ function registerIpcHandlers() {
     if (result.canceled) return { canceled: true };
     await sftpDownload(sid, remotePath, result.filePath);
     return { filePath: result.filePath };
+  });
+
+  ipcMain.handle("sftp-delete", (_event, { sid, remotePath, isDir }) => {
+    return sftpDelete(sid, remotePath, isDir);
+  });
+
+  ipcMain.handle("sftp-rename", (_event, { sid, oldPath, newPath }) => {
+    return sftpRename(sid, oldPath, newPath);
+  });
+
+  ipcMain.handle("sftp-mkdir", (_event, { sid, remotePath }) => {
+    return sftpMkdir(sid, remotePath);
+  });
+
+  // Direct upload from a known local path (used by drag-and-drop).
+  ipcMain.handle("sftp-upload-path", async (_event, { sid, localPath, remotePath }) => {
+    await sftpUpload(sid, localPath, remotePath);
+    return { dest: remotePath };
   });
 
   ipcMain.handle("sftp-upload", async (event, { sid, remotePath }) => {

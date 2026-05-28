@@ -67,6 +67,7 @@ function sanitizeForRenderer(conn) {
     group: conn.group || "",
     sshKeyPath: conn.sshKeyPath || "",
     hasSshKey: !!conn.sshKeyPath,
+    hasSshKeyPassphrase: !!conn.encryptedSshKeyPassphrase,
   };
 }
 

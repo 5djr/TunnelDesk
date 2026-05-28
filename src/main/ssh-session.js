@@ -7,6 +7,9 @@ const { decryptPassword } = require("./crypto");
 let nextId = 1;
 // sessionId → { client, stream, sftpClient, connectionId, type }
 const sessions = new Map();
+// connectionId → Set<Client> for clients currently in the TCP/SSH handshake phase.
+// Allows cancelling an in-progress connection before it reaches "ready".
+const pendingClients = new Map();
 
 function genId() {
   return String(nextId++);
@@ -16,6 +19,7 @@ function genId() {
 function friendlySshError(err) {
   const code = err.code;
   const level = err.level;
+  const msg = err.message || String(err);
   if (code === "ECONNRESET")
     return "Connection reset by the server — make sure SSH is running on this host and port.";
   if (code === "ECONNREFUSED")
@@ -24,10 +28,12 @@ function friendlySshError(err) {
     return "Connection timed out — check the hostname and your network.";
   if (code === "ENOTFOUND") return "Hostname not found — check the server address.";
   if (level === "client-authentication")
-    return "Authentication failed — check your username and password / SSH key.";
+    return "Authentication failed — the server rejected your credentials. Verify your username, password, or SSH key.";
   if (level === "client-timeout")
     return "SSH handshake timed out — the server may be unreachable or overloaded.";
-  return err.message || String(err);
+  if (/passphrase|encrypted key/i.test(msg))
+    return "SSH key is passphrase-protected — add the key passphrase in the connection settings.";
+  return msg;
 }
 
 async function resolveConnection(connectionId) {
@@ -36,10 +42,12 @@ async function resolveConnection(connectionId) {
   if (!connection) throw new Error("Connection not found");
   const password =
     decryptPassword(connection.encryptedPassword) || connection.password || undefined;
-  return { connection, password };
+  const keyPassphrase =
+    decryptPassword(connection.encryptedSshKeyPassphrase) || undefined;
+  return { connection, password, keyPassphrase };
 }
 
-function buildConnectConfig(connection, password) {
+function buildConnectConfig(connection, password, keyPassphrase) {
   const isCf = connection.protocol === "ssh-cf";
   const cfg = {
     host: isCf ? "127.0.0.1" : connection.hostname,
@@ -48,10 +56,16 @@ function buildConnectConfig(connection, password) {
       (connection.username && connection.username.trim()) || os.userInfo().username,
     readyTimeout: 30000,
     keepaliveInterval: 15000,
+    keepaliveCountMax: 5,
+    // Allow keyboard-interactive so servers that send a PAM/password prompt
+    // after the TCP handshake (instead of accepting password in the auth step)
+    // are handled automatically.
+    tryKeyboard: true,
   };
   if (connection.sshKeyPath && connection.sshKeyPath.trim()) {
     try {
       cfg.privateKey = fs.readFileSync(connection.sshKeyPath.trim());
+      if (keyPassphrase) cfg.passphrase = keyPassphrase;
     } catch {
       // Key file missing — fall through to password auth.
     }
@@ -62,12 +76,36 @@ function buildConnectConfig(connection, password) {
 
 // ─── Terminal (PTY shell) session ─────────────────────────────────────────────
 
+function trackPending(connectionId, client) {
+  if (!pendingClients.has(connectionId)) pendingClients.set(connectionId, new Set());
+  pendingClients.get(connectionId).add(client);
+}
+
+function untrackPending(connectionId, client) {
+  const s = pendingClients.get(connectionId);
+  if (!s) return;
+  s.delete(client);
+  if (s.size === 0) pendingClients.delete(connectionId);
+}
+
+function cancelPendingConnections(connectionId) {
+  const s = pendingClients.get(connectionId);
+  if (!s) return;
+  for (const client of s) {
+    try {
+      client.destroy();
+    } catch {}
+  }
+  pendingClients.delete(connectionId);
+}
+
 function createTermSession(connectionId, cfg, onData, onClose) {
   return new Promise((resolve, reject) => {
     const client = new Client();
     const sid = genId();
 
     client.on("ready", () => {
+      untrackPending(connectionId, client);
       client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
         if (err) {
           client.end();
@@ -92,7 +130,13 @@ function createTermSession(connectionId, cfg, onData, onClose) {
       });
     });
 
+    client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+      // Respond to every challenge (e.g. PAM "Password:") with the stored password.
+      finish(prompts.map(() => cfg.password || ""));
+    });
+
     client.on("error", (err) => {
+      untrackPending(connectionId, client);
       sessions.delete(sid);
       try {
         client.destroy();
@@ -100,13 +144,14 @@ function createTermSession(connectionId, cfg, onData, onClose) {
       reject(new Error(friendlySshError(err)));
     });
 
+    trackPending(connectionId, client);
     client.connect(cfg);
   });
 }
 
 async function sshCreateTerm(connectionId, onData, onClose) {
-  const { connection, password } = await resolveConnection(connectionId);
-  const cfg = buildConnectConfig(connection, password);
+  const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
+  const cfg = buildConnectConfig(connection, password, keyPassphrase);
   return createTermSession(connectionId, cfg, onData, onClose);
 }
 
@@ -118,6 +163,7 @@ function createSftpSession(connectionId, cfg, onClose) {
     const sid = genId();
 
     client.on("ready", () => {
+      untrackPending(connectionId, client);
       client.sftp((err, sftp) => {
         if (err) {
           client.end();
@@ -139,7 +185,12 @@ function createSftpSession(connectionId, cfg, onClose) {
       });
     });
 
+    client.on("keyboard-interactive", (_name, _instr, _lang, prompts, finish) => {
+      finish(prompts.map(() => cfg.password || ""));
+    });
+
     client.on("error", (err) => {
+      untrackPending(connectionId, client);
       sessions.delete(sid);
       try {
         client.destroy();
@@ -147,13 +198,14 @@ function createSftpSession(connectionId, cfg, onClose) {
       reject(new Error(friendlySshError(err)));
     });
 
+    trackPending(connectionId, client);
     client.connect(cfg);
   });
 }
 
 async function sshCreateSftp(connectionId, onClose) {
-  const { connection, password } = await resolveConnection(connectionId);
-  const cfg = buildConnectConfig(connection, password);
+  const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
+  const cfg = buildConnectConfig(connection, password, keyPassphrase);
   return createSftpSession(connectionId, cfg, onClose);
 }
 
@@ -244,6 +296,46 @@ function sftpUpload(sid, localPath, remotePath) {
   });
 }
 
+function sftpDelete(sid, remotePath, isDir) {
+  const s = sessions.get(sid);
+  if (!s || !s.sftpClient) return Promise.reject(new Error("No SFTP session"));
+  return new Promise((resolve, reject) => {
+    if (isDir) {
+      s.sftpClient.rmdir(remotePath, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    } else {
+      s.sftpClient.unlink(remotePath, (err) => {
+        if (err) reject(err);
+        else resolve();
+      });
+    }
+  });
+}
+
+function sftpRename(sid, oldPath, newPath) {
+  const s = sessions.get(sid);
+  if (!s || !s.sftpClient) return Promise.reject(new Error("No SFTP session"));
+  return new Promise((resolve, reject) => {
+    s.sftpClient.rename(oldPath, newPath, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
+function sftpMkdir(sid, remotePath) {
+  const s = sessions.get(sid);
+  if (!s || !s.sftpClient) return Promise.reject(new Error("No SFTP session"));
+  return new Promise((resolve, reject) => {
+    s.sftpClient.mkdir(remotePath, (err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+}
+
 // Close every open session that belongs to a given connectionId.
 // Called when the user explicitly disconnects so stale SSH sessions don't linger.
 function closeSessionsForConnection(connectionId) {
@@ -266,8 +358,12 @@ module.exports = {
   sshResize,
   sshCloseSession,
   closeSessionsForConnection,
+  cancelPendingConnections,
   sftpList,
   sftpHome,
   sftpDownload,
   sftpUpload,
+  sftpDelete,
+  sftpRename,
+  sftpMkdir,
 };

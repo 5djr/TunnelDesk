@@ -18,6 +18,7 @@ interface Connection {
   group: string;
   sshKeyPath: string;
   hasSshKey: boolean;
+  hasSshKeyPassphrase: boolean;
 }
 
 type ConnectionStatus = "connected" | "connecting" | "disconnected";
@@ -76,13 +77,17 @@ interface TermTab {
   fitAddon: FitAddon | null;
   el: HTMLDivElement; // persistent DOM element — moved in/out of detailPanel
   closed: boolean;
+  cancelled: boolean; // closed while still connecting (sessionId was null)
   error: string | null;
+  fontSize: number;
   // sftp state
   sftpPath: string;
   sftpEntries: SftpEntry[];
   sftpLoading: boolean;
   sftpSelected: string | null;
   sftpShowHidden: boolean;
+  sftpStatus: string | null;
+  sftpStatusTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ConnTermState {
@@ -103,6 +108,8 @@ declare global {
         username?: string;
         password?: string;
         keepExistingPassword?: boolean;
+        sshKeyPassphrase?: string;
+        keepExistingSshKeyPassphrase?: boolean;
         protocol: string;
         notes?: string;
         group?: string;
@@ -128,11 +135,16 @@ declare global {
       onLog(cb: (data: { id?: string; message: string }) => void): void;
       onRdpClosed(cb: (data: { id: string }) => void): void;
       onRdpReconnected(cb: (data: { id: string }) => void): void;
+      telnetTermCreate(connectionId: string): Promise<string>;
+      telnetWrite(sid: string, data: string): Promise<void>;
+      telnetResize(sid: string, cols: number, rows: number): Promise<void>;
+      telnetCloseSession(sid: string): Promise<void>;
       sshTermCreate(connectionId: string): Promise<string>;
       sshSftpCreate(connectionId: string): Promise<string>;
       sshWrite(sid: string, data: string): Promise<void>;
       sshResize(sid: string, cols: number, rows: number): Promise<void>;
       sshCloseSession(sid: string): Promise<void>;
+      cancelSshConnect(connId: string): Promise<void>;
       sftpList(sid: string, remotePath: string): Promise<SftpEntry[]>;
       sftpHome(sid: string): Promise<string>;
       sftpDownload(
@@ -143,6 +155,14 @@ declare global {
         sid: string,
         remotePath: string,
       ): Promise<{ canceled?: boolean; dest?: string }>;
+      sftpDelete(sid: string, remotePath: string, isDir: boolean): Promise<void>;
+      sftpRename(sid: string, oldPath: string, newPath: string): Promise<void>;
+      sftpMkdir(sid: string, remotePath: string): Promise<void>;
+      sftpUploadPath(
+        sid: string,
+        localPath: string,
+        remotePath: string,
+      ): Promise<{ dest: string }>;
       onSshData(cb: (d: { sid: string; data: string }) => void): void;
       onSshClose(
         cb: (d: { sid: string; code: number | null; signal: string | null }) => void,
@@ -180,12 +200,16 @@ let currentSettings: Settings | null = null;
 const _twParams = new URLSearchParams(window.location.search);
 const IS_TERMINAL_WINDOW = _twParams.get("mode") === "terminal";
 const TERM_WIN_CONN_ID = IS_TERMINAL_WINDOW ? (_twParams.get("connId") ?? null) : null;
+const IS_FORM_WINDOW = _twParams.get("mode") === "form";
+const FORM_WIN_CONN_ID = IS_FORM_WINDOW ? (_twParams.get("connId") ?? null) : null;
 
 // ─── Terminal state ───────────────────────────────────────────────────────────
 // Keyed by connectionId; values survive re-renders so xterm instances aren't recreated.
 const termState = new Map<string, ConnTermState>();
 // Reverse map: sessionId → { connId, tabId } for routing ssh-data events.
 const sidToTab = new Map<string, { connId: string; tabId: string }>();
+// Track which sids are Telnet sessions (vs SSH) for routing write/close IPC.
+const telnetSids = new Set<string>();
 let termTabCounter = 0;
 
 function genTabId(): string {
@@ -238,6 +262,9 @@ const sshKeyGroup = document.getElementById("ssh-key-group") as HTMLElement;
 const sshKeyPathInput = document.getElementById("ssh-key-path") as HTMLInputElement;
 const sshKeyBrowseBtn = document.getElementById("ssh-key-browse") as HTMLButtonElement;
 const sshKeyClearBtn = document.getElementById("ssh-key-clear") as HTMLButtonElement;
+const sshKeyPassphraseInput = document.getElementById(
+  "ssh-key-passphrase",
+) as HTMLInputElement;
 const newBtn = document.getElementById("new-connection") as HTMLButtonElement;
 const cancelTopBtn = document.getElementById("cancel-save") as HTMLButtonElement;
 const cancelBotBtn = document.getElementById("cancel-save-bottom") as HTMLButtonElement;
@@ -774,6 +801,124 @@ async function updateDebugStats(connId: string) {
   }
 }
 
+// ─── Dropdown menu helper ─────────────────────────────────────────────────────
+
+type MenuEntry =
+  | { separator: true }
+  | { label: string; disabled?: boolean; action: () => void };
+
+function showDropdownMenu(x: number, y: number, items: MenuEntry[]): void {
+  const old = document.getElementById("_td-dropdown");
+  if (old) old.remove();
+
+  const menu = document.createElement("div");
+  menu.id = "_td-dropdown";
+  menu.style.cssText =
+    "position:fixed;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:9999;min-width:160px;padding:4px 0;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.4)";
+  menu.style.left = `${x}px`;
+  menu.style.top = `${y}px`;
+
+  const dismiss = () => {
+    if (document.body.contains(menu)) document.body.removeChild(menu);
+    document.removeEventListener("mousedown", onOut);
+  };
+  const onOut = (e: MouseEvent) => {
+    if (!menu.contains(e.target as Node)) dismiss();
+  };
+
+  for (const entry of items) {
+    if ("separator" in entry) {
+      const sep = document.createElement("div");
+      sep.style.cssText = "height:1px;background:var(--border);margin:4px 0;";
+      menu.appendChild(sep);
+      continue;
+    }
+    const el = document.createElement("div");
+    el.style.cssText = `padding:7px 14px;cursor:${entry.disabled ? "default" : "pointer"};opacity:${entry.disabled ? "0.4" : "1"};`;
+    el.textContent = entry.label;
+    if (!entry.disabled) {
+      el.addEventListener("mouseenter", () => {
+        el.style.background = "var(--bg-hover)";
+      });
+      el.addEventListener("mouseleave", () => {
+        el.style.background = "";
+      });
+      el.addEventListener("click", () => {
+        dismiss();
+        entry.action();
+      });
+    }
+    menu.appendChild(el);
+  }
+
+  document.body.appendChild(menu);
+  requestAnimationFrame(() => {
+    const rect = menu.getBoundingClientRect();
+    if (rect.right > window.innerWidth)
+      menu.style.left = `${Math.max(0, x - rect.width)}px`;
+    if (rect.bottom > window.innerHeight)
+      menu.style.top = `${Math.max(0, y - rect.height)}px`;
+  });
+  setTimeout(() => document.addEventListener("mousedown", onOut), 0);
+}
+
+// Lightweight prompt dialog (window.prompt is blocked in sandboxed Electron).
+function showPrompt(message: string, defaultValue: string): Promise<string | null> {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.style.cssText =
+      "position:fixed;inset:0;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000;";
+
+    const box = document.createElement("div");
+    box.style.cssText =
+      "background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius);padding:20px;min-width:300px;max-width:420px;box-shadow:0 8px 32px rgba(0,0,0,0.4);";
+
+    const msg = document.createElement("p");
+    msg.style.cssText = "margin:0 0 10px;font-size:13px;color:var(--text);";
+    msg.textContent = message;
+
+    const input = document.createElement("input");
+    input.type = "text";
+    input.value = defaultValue;
+    input.className = "form-input";
+    input.style.cssText = "width:100%;margin-bottom:12px;box-sizing:border-box;";
+
+    const actions = document.createElement("div");
+    actions.style.cssText = "display:flex;gap:8px;justify-content:flex-end;";
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.className = "btn btn-ghost";
+    cancelBtn.textContent = "Cancel";
+    const okBtn = document.createElement("button");
+    okBtn.className = "btn btn-primary";
+    okBtn.textContent = "OK";
+
+    actions.append(cancelBtn, okBtn);
+    box.append(msg, input, actions);
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+
+    const cleanup = (result: string | null) => {
+      document.body.removeChild(overlay);
+      resolve(result);
+    };
+
+    okBtn.addEventListener("click", () => cleanup(input.value.trim() || null));
+    cancelBtn.addEventListener("click", () => cleanup(null));
+    overlay.addEventListener("click", (e) => {
+      if (e.target === overlay) cleanup(null);
+    });
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") cleanup(input.value.trim() || null);
+      if (e.key === "Escape") cleanup(null);
+    });
+    requestAnimationFrame(() => {
+      input.focus();
+      input.select();
+    });
+  });
+}
+
 // ─── Terminal management ──────────────────────────────────────────────────────
 
 function getOrInitTermState(connId: string): ConnTermState {
@@ -805,12 +950,16 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
     fitAddon: null,
     el,
     closed: false,
+    cancelled: false,
     error: null,
+    fontSize: 13,
     sftpPath: "/",
     sftpEntries: [],
     sftpLoading: type === "sftp", // start spinner immediately for SFTP tabs
     sftpSelected: null,
     sftpShowHidden: false,
+    sftpStatus: null,
+    sftpStatusTimer: null,
   };
   state.tabs.push(tab);
   state.activeTabId = tabId;
@@ -819,9 +968,10 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
     const term = new Terminal({
       theme: xtermTheme,
       fontFamily: '"Cascadia Code", "Consolas", "Monaco", monospace',
-      fontSize: 13,
+      fontSize: tab.fontSize,
       lineHeight: 1.25,
       cursorBlink: true,
+      scrollback: 5000,
       allowProposedApi: true,
     });
     const fitAddon = new FitAddon();
@@ -829,27 +979,146 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
     term.open(el);
     tab.term = term;
     tab.fitAddon = fitAddon;
+
+    // Font zoom: Ctrl++ / Ctrl+= / Ctrl+- / Ctrl+0
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey || e.shiftKey || e.altKey) return true;
+      if (e.key === "=" || e.key === "+") {
+        tab.fontSize = Math.min(28, tab.fontSize + 1);
+        term.options.fontSize = tab.fontSize;
+        fitAddon.fit();
+        return false;
+      }
+      if (e.key === "-") {
+        tab.fontSize = Math.max(8, tab.fontSize - 1);
+        term.options.fontSize = tab.fontSize;
+        fitAddon.fit();
+        return false;
+      }
+      if (e.key === "0") {
+        tab.fontSize = 13;
+        term.options.fontSize = tab.fontSize;
+        fitAddon.fit();
+        return false;
+      }
+      // Ctrl+Shift+C / Ctrl+Shift+V handled below via shiftKey check — skip here.
+      return true;
+    });
+
+    // Ctrl+Shift+C = copy, Ctrl+Shift+V = paste
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey || !e.shiftKey) return true;
+      if (e.key === "C") {
+        const sel = term.getSelection();
+        if (sel) void navigator.clipboard.writeText(sel);
+        return false;
+      }
+      if (e.key === "V") {
+        void navigator.clipboard.readText().then((text) => {
+          if (text && tab.sessionId) void window.api.sshWrite(tab.sessionId, text);
+        });
+        return false;
+      }
+      return true;
+    });
+
+    // Right-click context menu: copy / paste / zoom
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      const sel = term.getSelection();
+      showDropdownMenu(e.clientX, e.clientY, [
+        {
+          label: sel ? "Copy" : "Copy (no selection)",
+          disabled: !sel,
+          action: () => {
+            if (sel) void navigator.clipboard.writeText(sel);
+          },
+        },
+        {
+          label: "Paste",
+          action: () => {
+            void navigator.clipboard.readText().then((text) => {
+              if (text && tab.sessionId) void window.api.sshWrite(tab.sessionId, text);
+            });
+          },
+        },
+        { separator: true },
+        {
+          label: "Zoom In",
+          disabled: tab.fontSize >= 28,
+          action: () => {
+            tab.fontSize = Math.min(28, tab.fontSize + 1);
+            term.options.fontSize = tab.fontSize;
+            fitAddon.fit();
+          },
+        },
+        {
+          label: "Zoom Out",
+          disabled: tab.fontSize <= 8,
+          action: () => {
+            tab.fontSize = Math.max(8, tab.fontSize - 1);
+            term.options.fontSize = tab.fontSize;
+            fitAddon.fit();
+          },
+        },
+        {
+          label: "Reset Zoom",
+          disabled: tab.fontSize === 13,
+          action: () => {
+            tab.fontSize = 13;
+            term.options.fontSize = tab.fontSize;
+            fitAddon.fit();
+          },
+        },
+      ]);
+    });
   }
 
   // Render the shell immediately (tab bar appears, session shows loading state).
   if (selectedId === connId)
     renderTerminalDetail(connections.find((c) => c.id === connId)!);
 
-  // For ssh (direct), the main process leaves status at "connecting" until we
-  // confirm the session succeeded or failed.
-  const isSshDirect = connections.find((c) => c.id === connId)?.protocol === "ssh";
+  // For ssh-direct and telnet, the main process leaves status at "connecting"
+  // until we confirm the session succeeded or failed via ssh-report-status.
+  const connProtocol = connections.find((c) => c.id === connId)?.protocol ?? "";
+  const isTelnet = connProtocol === "telnet";
+  const isDirectProtocol = connProtocol === "ssh" || isTelnet;
 
   try {
     if (type === "term") {
-      const sid = await window.api.sshTermCreate(connId);
+      const sid = isTelnet
+        ? await window.api.telnetTermCreate(connId)
+        : await window.api.sshTermCreate(connId);
+
+      if (tab.cancelled) {
+        // Tab was closed while connecting — kill the session immediately.
+        void (isTelnet
+          ? window.api.telnetCloseSession(sid)
+          : window.api.sshCloseSession(sid));
+        return;
+      }
       tab.sessionId = sid;
       sidToTab.set(sid, { connId, tabId });
-      tab.term!.onData((data) => window.api.sshWrite(sid, data));
-      tab.term!.onResize(({ cols, rows }) => window.api.sshResize(sid, cols, rows));
+
+      if (isTelnet) {
+        telnetSids.add(sid);
+        tab.term!.onData((data) => void window.api.telnetWrite(sid, data));
+        tab.term!.onResize(
+          ({ cols, rows }) => void window.api.telnetResize(sid, cols, rows),
+        );
+      } else {
+        tab.term!.onData((data) => window.api.sshWrite(sid, data));
+        tab.term!.onResize(({ cols, rows }) => window.api.sshResize(sid, cols, rows));
+      }
+
       tab.fitAddon!.fit();
-      if (isSshDirect) void window.api.sshReportStatus(connId, true);
+      if (isDirectProtocol) void window.api.sshReportStatus(connId, true);
     } else {
       const sid = await window.api.sshSftpCreate(connId);
+      if (tab.cancelled) {
+        void window.api.sshCloseSession(sid);
+        return;
+      }
       tab.sessionId = sid;
       sidToTab.set(sid, { connId, tabId });
       try {
@@ -862,13 +1131,15 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       // SFTP tabs never drive connection status — only the terminal tab does.
     }
   } catch (err) {
+    if (tab.cancelled) return; // status already reset by closeTermTab
     let msg = err instanceof Error ? err.message : String(err);
     // Electron wraps IPC rejections with "Error invoking remote method '...': Error: ..."
     msg = msg.replace(/^Error invoking remote method '[^']+': (Error: )?/, "");
     tab.error = msg;
     tab.closed = true;
-    // Only terminal tabs own the ssh-direct connection status.
-    if (isSshDirect && type === "term") void window.api.sshReportStatus(connId, false);
+    // Only terminal tabs own the direct-protocol connection status.
+    if (isDirectProtocol && type === "term")
+      void window.api.sshReportStatus(connId, false);
   }
 
   if (selectedId === connId)
@@ -881,8 +1152,28 @@ function closeTermTab(connId: string, tabId: string): void {
   const tab = state.tabs.find((t) => t.tabId === tabId);
   if (!tab) return;
   if (tab.sessionId) {
-    sidToTab.delete(tab.sessionId);
-    void window.api.sshCloseSession(tab.sessionId);
+    const sid = tab.sessionId;
+    sidToTab.delete(sid);
+    const isTelnetSid = telnetSids.has(sid);
+    telnetSids.delete(sid);
+    void (isTelnetSid
+      ? window.api.telnetCloseSession(sid)
+      : window.api.sshCloseSession(sid));
+    // For direct-protocol connections: report disconnect if no other live term tabs remain.
+    const proto = connections.find((c) => c.id === connId)?.protocol;
+    if ((proto === "ssh" || proto === "telnet") && tab.type === "term") {
+      const remaining = state.tabs.filter(
+        (t) => t.tabId !== tabId && t.type === "term" && !t.closed,
+      );
+      if (remaining.length === 0) void window.api.sshReportStatus(connId, false);
+    }
+  } else if (!tab.closed) {
+    // Still connecting — mark cancelled so addTermTab ignores the eventual resolve,
+    // kill the in-progress TCP client, and reset the status immediately.
+    tab.cancelled = true;
+    void window.api.cancelSshConnect(connId);
+    const proto = connections.find((c) => c.id === connId)?.protocol;
+    if (proto === "ssh") void window.api.sshReportStatus(connId, false);
   }
   tab.term?.dispose();
   state.tabs = state.tabs.filter((t) => t.tabId !== tabId);
@@ -928,14 +1219,37 @@ function fitActiveTerminal(connId: string): void {
 function closeAllTermTabs(connId: string): void {
   const state = termState.get(connId);
   if (!state) return;
+  let hasPending = false;
   for (const tab of state.tabs) {
     if (tab.sessionId) {
-      sidToTab.delete(tab.sessionId);
-      void window.api.sshCloseSession(tab.sessionId);
+      const sid = tab.sessionId;
+      sidToTab.delete(sid);
+      const isTelnetSid = telnetSids.has(sid);
+      telnetSids.delete(sid);
+      void (isTelnetSid
+        ? window.api.telnetCloseSession(sid)
+        : window.api.sshCloseSession(sid));
+    } else if (!tab.closed) {
+      tab.cancelled = true;
+      hasPending = true;
     }
     tab.term?.dispose();
   }
+  if (hasPending) void window.api.cancelSshConnect(connId);
   termState.delete(connId);
+}
+
+function setSftpStatus(connId: string, tab: TermTab, msg: string, ms = 3000) {
+  if (tab.sftpStatusTimer !== null) clearTimeout(tab.sftpStatusTimer);
+  tab.sftpStatus = msg;
+  if (selectedId === connId)
+    renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  tab.sftpStatusTimer = setTimeout(() => {
+    tab.sftpStatus = null;
+    tab.sftpStatusTimer = null;
+    if (selectedId === connId)
+      renderTerminalDetail(connections.find((c) => c.id === connId)!);
+  }, ms);
 }
 
 async function sftpNavigate(
@@ -1062,7 +1376,21 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   refreshBtn.title = "Refresh";
   refreshBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><polyline points="23 4 23 10 17 10"/><path d="M20.5 15a9 9 0 11-2.1-7.4L23 10"/></svg>`;
 
-  toolbar.append(upBtn, breadcrumb, hiddenBtn, uploadBtn, downloadBtn, refreshBtn);
+  // New Folder button
+  const newFolderBtn = document.createElement("button");
+  newFolderBtn.className = "sftp-action-btn";
+  newFolderBtn.title = "New folder";
+  newFolderBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg> New Folder`;
+
+  toolbar.append(
+    upBtn,
+    breadcrumb,
+    hiddenBtn,
+    newFolderBtn,
+    uploadBtn,
+    downloadBtn,
+    refreshBtn,
+  );
 
   // ── Column headers ───────────────────────────────────────────────────────────
   const colHeader = document.createElement("div");
@@ -1124,7 +1452,54 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   const selLabel = selectedEntry
     ? `  ·  ${escapeHtml(selectedEntry.name)}${selectedEntry.isDir ? "/" : "  " + formatBytes(selectedEntry.size)}`
     : "";
-  statusBar.innerHTML = `<span>${itemLabel}${hiddenLabel}${selLabel}</span>`;
+  const opStatus = tab.sftpStatus
+    ? `<span style="margin-left:auto;color:var(--connected);font-size:11px;">${escapeHtml(tab.sftpStatus)}</span>`
+    : "";
+  statusBar.innerHTML = `<span>${itemLabel}${hiddenLabel}${selLabel}</span>${opStatus}`;
+
+  // Drag-and-drop upload: drop local files onto the SFTP panel.
+  root.addEventListener("dragover", (e) => {
+    if (!tab.sessionId || !e.dataTransfer?.files.length) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+    root.style.outline = "2px solid var(--connecting)";
+    root.style.outlineOffset = "-2px";
+  });
+  root.addEventListener("dragleave", () => {
+    root.style.outline = "";
+    root.style.outlineOffset = "";
+  });
+  root.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    root.style.outline = "";
+    root.style.outlineOffset = "";
+    if (!tab.sessionId) return;
+    const files = Array.from(e.dataTransfer?.files ?? []);
+    if (!files.length) return;
+    let uploaded = 0;
+    const errors: string[] = [];
+    for (const file of files) {
+      const localPath = (file as File & { path?: string }).path;
+      if (!localPath) continue;
+      const dest = sftpJoin(tab.sftpPath, file.name);
+      try {
+        await window.api.sftpUploadPath(tab.sessionId, localPath, dest);
+        uploaded++;
+      } catch (err) {
+        errors.push(file.name);
+      }
+    }
+    void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+    if (errors.length) {
+      showToast(`${uploaded} uploaded, ${errors.length} failed.`, "error");
+    } else if (uploaded > 0) {
+      setSftpStatus(
+        connId,
+        tab,
+        `${uploaded} file${uploaded !== 1 ? "s" : ""} uploaded.`,
+      );
+    }
+  });
 
   root.append(toolbar, colHeader, list, statusBar);
 
@@ -1147,18 +1522,42 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
       renderTerminalDetail(connections.find((c) => c.id === connId)!);
   });
 
+  newFolderBtn.addEventListener("click", async () => {
+    if (!tab.sessionId) return;
+    const name = await showPrompt("New folder name:", "New Folder");
+    if (!name || !tab.sessionId) return;
+    try {
+      await window.api.sftpMkdir(tab.sessionId, sftpJoin(tab.sftpPath, name));
+      void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+      setSftpStatus(connId, tab, `Folder "${name}" created.`);
+    } catch (e) {
+      showToast(
+        `Create folder failed: ${e instanceof Error ? e.message : String(e)}`,
+        "error",
+      );
+    }
+  });
+
   uploadBtn.addEventListener("click", async () => {
     if (!tab.sessionId) return;
     const result = await window.api.sftpUpload(tab.sessionId, tab.sftpPath);
-    if (!result.canceled) void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+    if (!result.canceled) {
+      void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+      const fname = result.dest ? (result.dest.split("/").pop() ?? "file") : "file";
+      setSftpStatus(connId, tab, `"${fname}" uploaded.`);
+    }
   });
 
   downloadBtn.addEventListener("click", async () => {
     if (!tab.sessionId || !tab.sftpSelected) return;
-    await window.api.sftpDownload(
+    const result = await window.api.sftpDownload(
       tab.sessionId,
       sftpJoin(tab.sftpPath, tab.sftpSelected),
     );
+    if (!result.canceled && result.filePath) {
+      const fname = result.filePath.split(/[\\/]/).pop() ?? "file";
+      setSftpStatus(connId, tab, `"${fname}" saved.`);
+    }
   });
 
   refreshBtn.addEventListener("click", () =>
@@ -1186,6 +1585,74 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
         if (!tab.sessionId) return;
         void window.api.sftpDownload(tab.sessionId, sftpJoin(tab.sftpPath, name));
       }
+    });
+    row.addEventListener("contextmenu", (e) => {
+      const name = row.dataset.name!;
+      if (name === "..") return;
+      e.preventDefault();
+      const isDir = row.dataset.isdir === "true";
+      const entry = tab.sftpEntries.find((en) => en.name === name);
+      if (!entry) return;
+      // Select the right-clicked entry
+      tab.sftpSelected = name;
+      if (selectedId === connId)
+        renderTerminalDetail(connections.find((c) => c.id === connId)!);
+
+      showDropdownMenu(e.clientX, e.clientY, [
+        {
+          label: "Download",
+          disabled: isDir,
+          action: () => {
+            if (!tab.sessionId) return;
+            void window.api.sftpDownload(tab.sessionId, sftpJoin(tab.sftpPath, name));
+          },
+        },
+        {
+          label: "Rename",
+          action: async () => {
+            const newName = await showPrompt("Rename to:", name);
+            if (!newName || newName === name || !tab.sessionId) return;
+            try {
+              await window.api.sftpRename(
+                tab.sessionId,
+                sftpJoin(tab.sftpPath, name),
+                sftpJoin(tab.sftpPath, newName),
+              );
+              void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+              setSftpStatus(connId, tab, `Renamed to "${newName}".`);
+            } catch (err) {
+              showToast(
+                `Rename failed: ${err instanceof Error ? err.message : String(err)}`,
+                "error",
+              );
+            }
+          },
+        },
+        { separator: true },
+        {
+          label: `Delete "${name}"`,
+          action: async () => {
+            const ok = await showConfirm(
+              `Delete "${name}"?${isDir ? " (directory must be empty)" : ""} This cannot be undone.`,
+            );
+            if (!ok || !tab.sessionId) return;
+            try {
+              await window.api.sftpDelete(
+                tab.sessionId,
+                sftpJoin(tab.sftpPath, name),
+                isDir && !entry.isSymlink,
+              );
+              void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+              setSftpStatus(connId, tab, `"${name}" deleted.`);
+            } catch (err) {
+              showToast(
+                `Delete failed: ${err instanceof Error ? err.message : String(err)}`,
+                "error",
+              );
+            }
+          },
+        },
+      ]);
     });
   });
 
@@ -1257,7 +1724,9 @@ function renderTerminalDetail(conn: Connection): void {
     };
 
     item("Terminal", () => void addTermTab(conn.id, "term"));
-    item("File Transfer (SFTP)", () => void addTermTab(conn.id, "sftp"));
+    if (conn.protocol === "ssh" || conn.protocol === "ssh-cf") {
+      item("File Transfer (SFTP)", () => void addTermTab(conn.id, "sftp"));
+    }
 
     document.body.appendChild(menu);
     const dismiss = (ev: MouseEvent) => {
@@ -1297,7 +1766,22 @@ function renderTerminalDetail(conn: Connection): void {
     if (tab.type === "term") {
       tab.el.classList.toggle("active", tab.tabId === state.activeTabId);
       if (tab.closed || tab.error) {
-        tab.el.innerHTML = `<div class="${tab.error ? "term-tab-error" : "term-tab-closed"}">${escapeHtml(tab.error ?? "Connection closed.")}</div>`;
+        const msgDiv = document.createElement("div");
+        msgDiv.className = tab.error ? "term-tab-error" : "term-tab-closed";
+        msgDiv.textContent = tab.error ?? "Connection closed.";
+        if (!tab.error) {
+          const reconnBtn = document.createElement("button");
+          reconnBtn.className = "btn btn-secondary btn-sm";
+          reconnBtn.style.cssText = "display:block;margin-top:14px;";
+          reconnBtn.textContent = "Reconnect";
+          reconnBtn.addEventListener("click", () => {
+            closeTermTab(conn.id, tab.tabId);
+            void addTermTab(conn.id, "term");
+          });
+          msgDiv.appendChild(reconnBtn);
+        }
+        tab.el.innerHTML = "";
+        tab.el.appendChild(msgDiv);
       }
       panelsEl.appendChild(tab.el);
     } else {
@@ -1462,7 +1946,7 @@ function renderDetail() {
   const svgActivity = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
 
   const isSshOrTelnet = proto === "ssh-cf" || proto === "ssh" || proto === "telnet";
-  const relaunchLabel = proto === "telnet" ? "Relaunch Telnet" : "Open Terminal";
+  const relaunchLabel = "Open Terminal";
 
   let connectActions = "";
   if (!isConnected && !isConnecting) {
@@ -1509,7 +1993,7 @@ function renderDetail() {
           ${rdpIsDown ? "RDP Disconnected" : statusLabel(status)}
         </span>
       </div>
-      <div class="detail-subtitle">${escapeHtml(conn.hostname)}</div>
+      ${conn.friendlyName ? `<div class="detail-subtitle">${escapeHtml(conn.hostname)}</div>` : ""}
     </div>
 
     <div class="command-bar">
@@ -1771,7 +2255,7 @@ async function handleAction(action: string, id: string, value?: string) {
     try {
       showToast(`${label}…`, "info");
       await window.api.connect(id);
-      if (proto === "ssh" || proto === "ssh-cf") {
+      if (proto === "ssh" || proto === "ssh-cf" || proto === "telnet") {
         appendLog(`Opening terminal — ${connName(id)}`);
         showToast("Opening terminal…", "info");
         void window.api.openTermWindow(id, connName(id));
@@ -1779,9 +2263,7 @@ async function handleAction(action: string, id: string, value?: string) {
         const successMsg =
           proto === "http" || proto === "https"
             ? "Opened in browser."
-            : proto === "telnet"
-              ? `${label} launched.`
-              : "Connected — client launched.";
+            : "Connected — client launched.";
         appendLog(`${label} launched — ${connName(id)}`);
         showToast(successMsg, "success");
       }
@@ -1797,24 +2279,7 @@ async function handleAction(action: string, id: string, value?: string) {
       showToast(errorMsg(err, "Disconnect failed."), "error");
     }
   } else if (action === "edit") {
-    const conn = connections.find((c) => c.id === id);
-    if (!conn) return;
-    idInput.value = conn.id;
-    nameInput.value = conn.friendlyName || "";
-    hostInput.value = conn.hostname;
-    portInput.value = String(conn.port);
-    protocolInput.value = conn.protocol || "rdp-cf";
-    groupInput.value = conn.group || "";
-    usernameInput.value = conn.username || "";
-    passwordInput.value = "";
-    passwordInput.placeholder = conn.hasPassword
-      ? "Leave empty to keep existing"
-      : "••••••••";
-    sshKeyPathInput.value = conn.sshKeyPath || "";
-    notesInput.value = conn.notes || "";
-    updateSshKeyVisibility();
-    formTitle.textContent = "Edit Tunnel";
-    openModal();
+    window.api.openFormWindow(id);
   } else if (action === "delete") {
     const conn = connections.find((c) => c.id === id);
     const label = conn ? conn.friendlyName || conn.hostname : "this tunnel";
@@ -1847,22 +2312,8 @@ async function handleAction(action: string, id: string, value?: string) {
       showToast(errorMsg(err, "Failed to launch Remote Desktop."), "error");
     }
   } else if (action === "relaunch-client") {
-    const proto = connections.find((c) => c.id === id)?.protocol ?? "ssh";
-    if (proto === "ssh" || proto === "ssh-cf") {
-      appendLog(`Open terminal — ${connName(id)}`);
-      void window.api.openTermWindow(id, connName(id));
-    } else {
-      const label = proto === "telnet" ? "Telnet" : "SSH terminal";
-      appendLog(`Relaunch ${label} — ${connName(id)}`);
-      try {
-        showToast(`Launching ${label}…`, "info");
-        await window.api.connect(id);
-        showToast(`${label} launched.`, "success");
-      } catch (err) {
-        appendLog(`Relaunch failed: ${errorMsg(err, "Unknown error")} — ${connName(id)}`);
-        showToast(errorMsg(err, `Failed to launch ${label}.`), "error");
-      }
-    }
+    appendLog(`Open terminal — ${connName(id)}`);
+    void window.api.openTermWindow(id, connName(id));
   } else if (action === "toggle-debug") {
     debugMode = !debugMode;
     renderDetail();
@@ -1921,6 +2372,10 @@ function openModal() {
 }
 
 function closeModal() {
+  if (IS_FORM_WINDOW) {
+    window.close();
+    return;
+  }
   formModal.classList.remove("open");
   setTimeout(() => {
     formModal.classList.add("hidden");
@@ -1941,14 +2396,15 @@ function resetForm() {
   passwordInput.value = "";
   passwordInput.placeholder = "••••••••";
   sshKeyPathInput.value = "";
+  sshKeyPassphraseInput.value = "";
+  sshKeyPassphraseInput.placeholder = "Leave empty if key has no passphrase";
   notesInput.value = "";
   updateSshKeyVisibility();
   formTitle.textContent = "New Tunnel";
 }
 
 newBtn.addEventListener("click", () => {
-  resetForm();
-  openModal();
+  window.api.openFormWindow();
 });
 cancelTopBtn.addEventListener("click", closeModal);
 cancelBotBtn.addEventListener("click", closeModal);
@@ -1968,6 +2424,8 @@ saveForm.addEventListener("submit", async (e) => {
     username: usernameInput.value.trim() || undefined,
     password: passwordInput.value || undefined,
     keepExistingPassword: isEdit && !passwordInput.value,
+    sshKeyPassphrase: sshKeyPassphraseInput.value || undefined,
+    keepExistingSshKeyPassphrase: isEdit && !sshKeyPassphraseInput.value,
     notes: notesInput.value.trim(),
     group: groupInput.value.trim(),
     sshKeyPath: sshKeyPathInput.value.trim(),
@@ -1981,9 +2439,13 @@ saveForm.addEventListener("submit", async (e) => {
 
   try {
     await window.api.saveConnection(conn);
-    closeModal();
-    await refreshConnections();
-    showToast("Tunnel saved.", "success");
+    if (IS_FORM_WINDOW) {
+      window.close();
+    } else {
+      closeModal();
+      await refreshConnections();
+      showToast("Tunnel saved.", "success");
+    }
   } catch (err) {
     showToast(errorMsg(err, "Failed to save."), "error");
   }
@@ -2020,8 +2482,7 @@ document.addEventListener("keydown", (e) => {
 
   if (e.ctrlKey && e.key === "n") {
     e.preventDefault();
-    resetForm();
-    openModal();
+    window.api.openFormWindow();
   } else if (e.ctrlKey && e.key === "d") {
     e.preventDefault();
     if (selectedId && !settingsView) {
@@ -2078,7 +2539,48 @@ async function refreshConnections() {
   }
 }
 
+// ─── Log resize handle ────────────────────────────────────────────────────────
+
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+  const logResizeHandle = document.getElementById("log-resize-handle") as HTMLElement;
+  const logPanelEl = document.querySelector(".log-panel") as HTMLElement;
+  let resizeDragging = false;
+  let resizeStartY = 0;
+  let resizeStartH = 0;
+
+  logResizeHandle.addEventListener("mousedown", (e) => {
+    resizeDragging = true;
+    resizeStartY = e.clientY;
+    resizeStartH = logPanelEl.offsetHeight;
+    logResizeHandle.classList.add("dragging");
+    document.body.style.cursor = "ns-resize";
+    (document.body.style as any).userSelect = "none";
+    e.preventDefault();
+  });
+
+  document.addEventListener("mousemove", (e) => {
+    if (!resizeDragging) return;
+    const delta = resizeStartY - e.clientY;
+    const newH = Math.max(60, Math.min(resizeStartH + delta, window.innerHeight - 200));
+    logPanelEl.style.height = `${newH}px`;
+  });
+
+  document.addEventListener("mouseup", () => {
+    if (!resizeDragging) return;
+    resizeDragging = false;
+    logResizeHandle.classList.remove("dragging");
+    document.body.style.cursor = "";
+    (document.body.style as any).userSelect = "";
+  });
+}
+
 // ─── IPC ──────────────────────────────────────────────────────────────────────
+
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+  window.api.onConnectionSaved(async () => {
+    await refreshConnections();
+  });
+}
 
 if (!IS_TERMINAL_WINDOW) {
   window.api.onStatusUpdate((data) => {
@@ -2167,17 +2669,26 @@ window.api.onSshClose(({ sid }) => {
   const loc = sidToTab.get(sid);
   if (!loc) return;
   sidToTab.delete(sid);
+  telnetSids.delete(sid);
   const state = termState.get(loc.connId);
   const tab = state?.tabs.find((t) => t.tabId === loc.tabId);
   if (!tab) return;
   tab.closed = true;
   tab.sessionId = null;
   if (tab.term) tab.term.write("\r\n\x1b[31mConnection closed.\x1b[0m\r\n");
-  appendLog(`SSH session closed — ${connName(loc.connId)}`);
-  if (selectedId === loc.connId) {
-    const conn = connections.find((c) => c.id === loc.connId);
-    if (conn) renderTerminalDetail(conn);
+  const conn = connections.find((c) => c.id === loc.connId);
+  const proto = conn?.protocol ?? "";
+  appendLog(
+    `${proto === "telnet" ? "Telnet" : "SSH"} session closed — ${connName(loc.connId)}`,
+  );
+  // For direct-protocol connections: mark disconnected when no live term tabs remain.
+  if (proto === "ssh" || proto === "telnet") {
+    const hasOpen = state?.tabs.some(
+      (t) => t.type === "term" && !t.closed && t.tabId !== loc.tabId,
+    );
+    if (!hasOpen) void window.api.sshReportStatus(loc.connId, false);
   }
+  if (selectedId === loc.connId && conn) renderTerminalDetail(conn);
 });
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -2213,6 +2724,50 @@ const termResizeObserver = new ResizeObserver(() => {
   if (selectedId) fitActiveTerminal(selectedId);
 });
 termResizeObserver.observe(detailPanel);
+
+// ─── Form window initializer ──────────────────────────────────────────────────
+
+async function initFormWindow(connId: string | null): Promise<void> {
+  document.body.classList.add("form-window-mode");
+  (document.querySelector(".app") as HTMLElement).style.display = "none";
+  const root = document.getElementById("form-window-root") as HTMLElement;
+  root.classList.remove("hidden");
+
+  // Move the modal card into the form window root
+  const modalCard = document.querySelector("#form-modal .modal") as HTMLElement;
+  root.appendChild(modalCard);
+
+  if (connId) {
+    try {
+      const conns: Connection[] = await window.api.loadConnections();
+      const conn = conns.find((c) => c.id === connId);
+      if (conn) {
+        idInput.value = conn.id;
+        nameInput.value = conn.friendlyName || "";
+        hostInput.value = conn.hostname;
+        portInput.value = String(conn.port);
+        protocolInput.value = conn.protocol || "rdp-cf";
+        groupInput.value = conn.group || "";
+        usernameInput.value = conn.username || "";
+        passwordInput.value = "";
+        passwordInput.placeholder = conn.hasPassword
+          ? "Leave empty to keep existing"
+          : "••••••••";
+        sshKeyPathInput.value = conn.sshKeyPath || "";
+        sshKeyPassphraseInput.value = "";
+        sshKeyPassphraseInput.placeholder = conn.hasSshKeyPassphrase
+          ? "Leave empty to keep existing"
+          : "Leave empty if key has no passphrase";
+        notesInput.value = conn.notes || "";
+        updateSshKeyVisibility();
+        formTitle.textContent = "Edit Tunnel";
+      }
+    } catch {}
+  } else {
+    resetForm();
+  }
+  setTimeout(() => nameInput.focus(), 50);
+}
 
 // ─── Terminal-only window initializer ─────────────────────────────────────────
 
@@ -2255,6 +2810,8 @@ async function init() {
 
 if (TERM_WIN_CONN_ID) {
   void initTerminalWindow(TERM_WIN_CONN_ID);
+} else if (IS_FORM_WINDOW) {
+  void initFormWindow(FORM_WIN_CONN_ID);
 } else {
   init();
 }

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("api", {
   openExternal: (url) => ipcRenderer.invoke("open-external", url),
   openTermWindow: (connId, label) =>
     ipcRenderer.invoke("open-term-window", { connId, label }),
+  openFormWindow: (connId) => ipcRenderer.invoke("open-form-window", { connId }),
   sshReportStatus: (connId, ok) =>
     ipcRenderer.invoke("ssh-report-status", { connId, ok }),
   // Replace any prior listener before adding so repeated calls don't accumulate.
@@ -47,12 +48,21 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.on("auth-required", (_, data) => callback(data));
   },
 
+  // ─── Telnet terminal ─────────────────────────────────────────────────────
+  telnetTermCreate: (connectionId) =>
+    ipcRenderer.invoke("telnet-term-create", connectionId),
+  telnetWrite: (sid, data) => ipcRenderer.invoke("telnet-write", { sid, data }),
+  telnetResize: (sid, cols, rows) =>
+    ipcRenderer.invoke("telnet-resize", { sid, cols, rows }),
+  telnetCloseSession: (sid) => ipcRenderer.invoke("telnet-close-session", sid),
+
   // ─── SSH terminal ────────────────────────────────────────────────────────
   sshTermCreate: (connectionId) => ipcRenderer.invoke("ssh-term-create", connectionId),
   sshSftpCreate: (connectionId) => ipcRenderer.invoke("ssh-sftp-create", connectionId),
   sshWrite: (sid, data) => ipcRenderer.invoke("ssh-write", { sid, data }),
   sshResize: (sid, cols, rows) => ipcRenderer.invoke("ssh-resize", { sid, cols, rows }),
   sshCloseSession: (sid) => ipcRenderer.invoke("ssh-close-session", sid),
+  cancelSshConnect: (connId) => ipcRenderer.invoke("cancel-ssh-connect", connId),
 
   // ─── SFTP ────────────────────────────────────────────────────────────────
   sftpList: (sid, remotePath) => ipcRenderer.invoke("sftp-list", { sid, remotePath }),
@@ -60,6 +70,13 @@ contextBridge.exposeInMainWorld("api", {
   sftpDownload: (sid, remotePath) =>
     ipcRenderer.invoke("sftp-download", { sid, remotePath }),
   sftpUpload: (sid, remotePath) => ipcRenderer.invoke("sftp-upload", { sid, remotePath }),
+  sftpUploadPath: (sid, localPath, remotePath) =>
+    ipcRenderer.invoke("sftp-upload-path", { sid, localPath, remotePath }),
+  sftpDelete: (sid, remotePath, isDir) =>
+    ipcRenderer.invoke("sftp-delete", { sid, remotePath, isDir }),
+  sftpRename: (sid, oldPath, newPath) =>
+    ipcRenderer.invoke("sftp-rename", { sid, oldPath, newPath }),
+  sftpMkdir: (sid, remotePath) => ipcRenderer.invoke("sftp-mkdir", { sid, remotePath }),
 
   // Push events — single dispatcher for all sessions, routed by sid in renderer.
   onSshData: (callback) => {
@@ -69,5 +86,9 @@ contextBridge.exposeInMainWorld("api", {
   onSshClose: (callback) => {
     ipcRenderer.removeAllListeners("ssh-close");
     ipcRenderer.on("ssh-close", (_, data) => callback(data));
+  },
+  onConnectionSaved: (callback) => {
+    ipcRenderer.removeAllListeners("connection-saved");
+    ipcRenderer.on("connection-saved", () => callback());
   },
 });

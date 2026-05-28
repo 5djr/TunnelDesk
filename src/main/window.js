@@ -98,4 +98,36 @@ function createTerminalWindow(connId, label) {
   return win;
 }
 
-module.exports = { createWindow, createTerminalWindow };
+function createFormWindow(connId) {
+  const query = { mode: "form" };
+  if (connId) query.connId = connId;
+
+  const win = new BrowserWindow({
+    width: 480,
+    height: 700,
+    minWidth: 400,
+    minHeight: 560,
+    resizable: true,
+    show: false,
+    frame: false,
+    backgroundColor: "#1b1b1b",
+    icon: path.join(__dirname, "..", "..", "assets", "icon.png"),
+    webPreferences: {
+      preload: path.join(__dirname, "..", "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      spellcheck: false,
+    },
+  });
+
+  win.loadFile(path.join(__dirname, "..", "..", "dist", "renderer", "index.html"), {
+    query,
+  });
+  win.setMenuBarVisibility(false);
+  win.setMenu(null);
+  win.once("ready-to-show", () => win.show());
+  return win;
+}
+
+module.exports = { createWindow, createTerminalWindow, createFormWindow };
