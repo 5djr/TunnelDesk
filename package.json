@@ -83,6 +83,7 @@
   },
   "devDependencies": {
     "@xterm/addon-fit": "^0.10.0",
+    "@xterm/addon-search": "^0.16.0",
     "@xterm/xterm": "^5.5.0",
     "electron": "^42.2.0",
     "electron-builder": "^26.8.1",

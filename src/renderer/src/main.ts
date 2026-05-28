@@ -1,5 +1,6 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -19,6 +20,9 @@ interface Connection {
   sshKeyPath: string;
   hasSshKey: boolean;
   hasSshKeyPassphrase: boolean;
+  jumpHost: string;
+  jumpPort: number | null;
+  temp: boolean;
 }
 
 type ConnectionStatus = "connected" | "connecting" | "disconnected";
@@ -55,6 +59,12 @@ interface Settings {
   minimizeToTray: boolean;
   startMinimized: boolean;
   logRetentionDays: number;
+  pinnedIds: string[];
+  sftpDownloadFolder: string;
+  theme: "dark" | "light" | "system";
+  connectionOrder: string[];
+  autoReconnect: boolean;
+  autoReconnectAttempts: number;
 }
 
 type TermTabType = "term" | "sftp";
@@ -88,6 +98,13 @@ interface TermTab {
   sftpShowHidden: boolean;
   sftpStatus: string | null;
   sftpStatusTimer: ReturnType<typeof setTimeout> | null;
+  sftpEditingPath: boolean;
+  multiSelected: Set<string>;
+  searchAddon: SearchAddon | null;
+  searchVisible: boolean;
+  reconnecting: boolean;
+  reconnectAttempt: number;
+  reconnectTimer: ReturnType<typeof setTimeout> | null;
 }
 
 interface ConnTermState {
@@ -146,6 +163,11 @@ declare global {
       sshResize(sid: string, cols: number, rows: number): Promise<void>;
       sshCloseSession(sid: string): Promise<void>;
       cancelSshConnect(connId: string): Promise<void>;
+      exportConnections(): Promise<{ canceled?: boolean; count?: number }>;
+      importConnections(): Promise<{ canceled?: boolean; added?: number }>;
+      showNotification(title: string, body: string): Promise<void>;
+      testHttp(url: string): Promise<{ statusCode: number | null; timeMs: number; error?: string }>;
+      deleteTempConnections(): Promise<void>;
       sftpList(sid: string, remotePath: string): Promise<SftpEntry[]>;
       sftpHome(sid: string): Promise<string>;
       sftpDownload(
@@ -188,6 +210,7 @@ let connections: Connection[] = [];
 const statuses: Record<string, ConnectionStatus> = {};
 const rdpClosed = new Set<string>();
 const authPendingUrls = new Map<string, string>(); // connectionId -> auth URL
+const sessionConnectedAt = new Map<string, number>(); // connectionId -> timestamp ms
 let selectedId: string | null = null;
 let debugMode = false;
 let debugPollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -196,6 +219,16 @@ let settingsView = false;
 let searchQuery = "";
 const collapsedGroups = new Set<string>();
 let currentSettings: Settings | null = null;
+const systemThemeMq = window.matchMedia("(prefers-color-scheme: dark)");
+
+function applyTheme(theme: "dark" | "light" | "system") {
+  const resolved = theme === "system" ? (systemThemeMq.matches ? "dark" : "light") : theme;
+  document.documentElement.dataset.theme = resolved;
+}
+
+systemThemeMq.addEventListener("change", () => {
+  if (currentSettings?.theme === "system") applyTheme("system");
+});
 
 // ─── Terminal window mode ─────────────────────────────────────────────────────
 // When loaded with ?mode=terminal&connId=<id> we render only the terminal view,
@@ -515,10 +548,13 @@ function localEndpoint(conn: Connection): string {
   return isCf ? `localhost:${conn.port}` : `${conn.hostname}:${conn.port}`;
 }
 
-// Show/hide the SSH key field based on selected protocol.
+// Show/hide the SSH key and jump host fields based on selected protocol.
 function updateSshKeyVisibility() {
   const proto = protocolInput.value;
-  sshKeyGroup.style.display = isSshProtocol(proto) ? "" : "none";
+  const isSsh = isSshProtocol(proto);
+  sshKeyGroup.style.display = isSsh ? "" : "none";
+  const jumpGroup = document.getElementById("jump-host-group");
+  if (jumpGroup) jumpGroup.style.display = isSsh ? "" : "none";
 }
 
 protocolInput.addEventListener("change", () => {
@@ -540,6 +576,18 @@ sshKeyBrowseBtn.addEventListener("click", async () => {
 sshKeyClearBtn.addEventListener("click", () => {
   sshKeyPathInput.value = "";
 });
+
+function wireRevealBtn(btnId: string, inputEl: HTMLInputElement) {
+  const btn = document.getElementById(btnId) as HTMLButtonElement | null;
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const isRevealed = inputEl.type === "text";
+    inputEl.type = isRevealed ? "password" : "text";
+    btn.classList.toggle("revealing", !isRevealed);
+  });
+}
+wireRevealBtn("toggle-password", passwordInput);
+wireRevealBtn("toggle-passphrase", sshKeyPassphraseInput);
 
 // ─── Log ──────────────────────────────────────────────────────────────────────
 
@@ -563,6 +611,8 @@ function appendLog(message: string) {
   msgSpan.textContent = message;
   entry.append(timeSpan, msgSpan);
   activityLog.appendChild(entry);
+  const allEntries = activityLog.querySelectorAll(".log-entry");
+  if (allEntries.length > 500) allEntries[0].remove();
   activityLog.scrollTop = activityLog.scrollHeight;
 }
 
@@ -965,6 +1015,13 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
     sftpShowHidden: false,
     sftpStatus: null,
     sftpStatusTimer: null,
+    sftpEditingPath: false,
+    multiSelected: new Set<string>(),
+    searchAddon: null,
+    searchVisible: false,
+    reconnecting: false,
+    reconnectAttempt: 0,
+    reconnectTimer: null,
   };
   state.tabs.push(tab);
   state.activeTabId = tabId;
@@ -980,10 +1037,26 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       allowProposedApi: true,
     });
     const fitAddon = new FitAddon();
+    const searchAddon = new SearchAddon();
     term.loadAddon(fitAddon);
+    term.loadAddon(searchAddon);
     term.open(el);
     tab.term = term;
     tab.fitAddon = fitAddon;
+    tab.searchAddon = searchAddon;
+
+    // Ctrl+F = toggle search
+    term.attachCustomKeyEventHandler((e) => {
+      if (e.type !== "keydown" || !e.ctrlKey || e.shiftKey || e.altKey) return true;
+      if (e.key === "f" || e.key === "F") {
+        tab.searchVisible = !tab.searchVisible;
+        if (!tab.searchVisible) tab.searchAddon?.clearDecorations();
+        const c = connections.find((c) => c.id === connId);
+        if (c) renderTerminalDetail(c);
+        return false;
+      }
+      return true;
+    });
 
     // Font zoom: Ctrl++ / Ctrl+= / Ctrl+- / Ctrl+0
     term.attachCustomKeyEventHandler((e) => {
@@ -1020,12 +1093,12 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       }
       if (e.key === "V") {
         void navigator.clipboard.readText().then((text) => {
-          if (text && tab.sessionId) {
-            const sid = tab.sessionId;
-            void (telnetSids.has(sid)
-              ? window.api.telnetWrite(sid, text)
-              : window.api.sshWrite(sid, text));
-          }
+          if (!text || !tab.sessionId) return;
+          const sid = tab.sessionId;
+          const send = telnetSids.has(sid)
+            ? (d: string) => void window.api.telnetWrite(sid, d)
+            : (d: string) => void window.api.sshWrite(sid, d);
+          for (let i = 0; i < text.length; i += 1024) send(text.slice(i, i + 1024));
         });
         return false;
       }
@@ -1048,12 +1121,12 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
           label: "Paste",
           action: () => {
             void navigator.clipboard.readText().then((text) => {
-              if (text && tab.sessionId) {
-                const sid = tab.sessionId;
-                void (telnetSids.has(sid)
-                  ? window.api.telnetWrite(sid, text)
-                  : window.api.sshWrite(sid, text));
-              }
+              if (!text || !tab.sessionId) return;
+              const sid = tab.sessionId;
+              const send = telnetSids.has(sid)
+                ? (d: string) => void window.api.telnetWrite(sid, d)
+                : (d: string) => void window.api.sshWrite(sid, d);
+              for (let i = 0; i < text.length; i += 1024) send(text.slice(i, i + 1024));
             });
           },
         },
@@ -1195,6 +1268,7 @@ function closeTermTab(connId: string, tabId: string): void {
     if (proto === "ssh" || proto === "telnet")
       void window.api.sshReportStatus(connId, false);
   }
+  if (tab.reconnectTimer !== null) clearTimeout(tab.reconnectTimer);
   tab.term?.dispose();
   state.tabs = state.tabs.filter((t) => t.tabId !== tabId);
   if (state.activeTabId === tabId) {
@@ -1352,31 +1426,71 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   upBtn.disabled = tab.sftpPath === "/";
   upBtn.innerHTML = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="19" x2="12" y2="5"/><polyline points="5 12 12 5 19 12"/></svg>`;
 
-  // Breadcrumb
-  const breadcrumb = document.createElement("div");
-  breadcrumb.className = "sftp-breadcrumb";
-  const pathParts = tab.sftpPath.split("/").filter(Boolean);
-  const crumbData: Array<{ label: string; path: string }> = [
-    { label: "/", path: "/" },
-    ...pathParts.map((part, i) => ({
-      label: part,
-      path: "/" + pathParts.slice(0, i + 1).join("/"),
-    })),
-  ];
-  crumbData.forEach((crumb, i) => {
-    const btn = document.createElement("button");
-    btn.className = "sftp-crumb-btn";
-    btn.textContent = crumb.label;
-    btn.dataset.path = crumb.path;
-    if (i === crumbData.length - 1) btn.classList.add("active");
-    breadcrumb.appendChild(btn);
-    if (i < crumbData.length - 1) {
-      const sep = document.createElement("span");
-      sep.className = "sftp-crumb-sep";
-      sep.textContent = "/";
-      breadcrumb.appendChild(sep);
-    }
-  });
+  // Breadcrumb or path edit input
+  let breadcrumbOrInput: HTMLElement;
+  if (tab.sftpEditingPath) {
+    const wrap = document.createElement("div");
+    wrap.className = "sftp-path-edit-wrap";
+    const pathInput = document.createElement("input");
+    pathInput.type = "text";
+    pathInput.className = "sftp-path-input";
+    pathInput.value = tab.sftpPath;
+    pathInput.spellcheck = false;
+    pathInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        const dest = pathInput.value.trim() || "/";
+        tab.sftpEditingPath = false;
+        void sftpNavigate(connId, tab.tabId, dest);
+      } else if (e.key === "Escape") {
+        tab.sftpEditingPath = false;
+        if (selectedId === connId) {
+          const c = connections.find((c) => c.id === connId);
+          if (c) renderTerminalDetail(c);
+        }
+      }
+    });
+    pathInput.addEventListener("blur", () => {
+      if (tab.sftpEditingPath) {
+        tab.sftpEditingPath = false;
+        if (selectedId === connId) {
+          const c = connections.find((c) => c.id === connId);
+          if (c) renderTerminalDetail(c);
+        }
+      }
+    });
+    wrap.appendChild(pathInput);
+    requestAnimationFrame(() => {
+      pathInput.focus();
+      pathInput.select();
+    });
+    breadcrumbOrInput = wrap;
+  } else {
+    const breadcrumb = document.createElement("div");
+    breadcrumb.className = "sftp-breadcrumb";
+    const pathParts = tab.sftpPath.split("/").filter(Boolean);
+    const crumbData: Array<{ label: string; path: string }> = [
+      { label: "/", path: "/" },
+      ...pathParts.map((part, i) => ({
+        label: part,
+        path: "/" + pathParts.slice(0, i + 1).join("/"),
+      })),
+    ];
+    crumbData.forEach((crumb, i) => {
+      const btn = document.createElement("button");
+      btn.className = "sftp-crumb-btn";
+      btn.textContent = crumb.label;
+      btn.dataset.path = crumb.path;
+      if (i === crumbData.length - 1) btn.classList.add("active");
+      breadcrumb.appendChild(btn);
+      if (i < crumbData.length - 1) {
+        const sep = document.createElement("span");
+        sep.className = "sftp-crumb-sep";
+        sep.textContent = "/";
+        breadcrumb.appendChild(sep);
+      }
+    });
+    breadcrumbOrInput = breadcrumb;
+  }
 
   // Hidden toggle
   const hiddenBtn = document.createElement("button");
@@ -1412,9 +1526,22 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   newFolderBtn.title = "New folder";
   newFolderBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg> New Folder`;
 
+  const editPathBtn = document.createElement("button");
+  editPathBtn.className = "sftp-icon-btn";
+  editPathBtn.title = "Go to path…";
+  editPathBtn.innerHTML = `<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4z"/></svg>`;
+  editPathBtn.addEventListener("click", () => {
+    tab.sftpEditingPath = true;
+    if (selectedId === connId) {
+      const c = connections.find((c) => c.id === connId);
+      if (c) renderTerminalDetail(c);
+    }
+  });
+
   toolbar.append(
     upBtn,
-    breadcrumb,
+    breadcrumbOrInput,
+    editPathBtn,
     hiddenBtn,
     newFolderBtn,
     uploadBtn,
@@ -1426,6 +1553,47 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   const colHeader = document.createElement("div");
   colHeader.className = "sftp-col-header";
   colHeader.innerHTML = `<span class="sftp-col-name">Name</span><span class="sftp-col-size">Size</span><span class="sftp-col-mtime">Modified</span>`;
+
+  // ── Multi-select action bar ──────────────────────────────────────────────────
+  const multiCount = tab.multiSelected.size;
+  if (multiCount > 0) {
+    const multiBar = document.createElement("div");
+    multiBar.className = "sftp-multi-bar";
+    multiBar.innerHTML = `<span>${multiCount} selected</span>`;
+    const clearBtn = document.createElement("button");
+    clearBtn.className = "sftp-action-btn";
+    clearBtn.textContent = "Clear";
+    clearBtn.addEventListener("click", () => {
+      tab.multiSelected.clear();
+      if (selectedId === connId) {
+        const c = connections.find((c) => c.id === connId);
+        if (c) renderTerminalDetail(c);
+      }
+    });
+    const delBtn = document.createElement("button");
+    delBtn.className = "sftp-action-btn";
+    delBtn.textContent = `Delete ${multiCount}`;
+    delBtn.style.color = "var(--error)";
+    delBtn.addEventListener("click", async () => {
+      if (!tab.sessionId) return;
+      const items = [...tab.multiSelected];
+      for (const name of items) {
+        const entry = tab.sftpEntries.find((e) => e.name === name);
+        if (!entry) continue;
+        try {
+          await window.api.sftpDelete(tab.sessionId, sftpJoin(tab.sftpPath, name), entry.isDir);
+        } catch {}
+      }
+      tab.multiSelected.clear();
+      void sftpNavigate(connId, tab.tabId, tab.sftpPath);
+      setSftpStatus(connId, tab, `${items.length} item${items.length !== 1 ? "s" : ""} deleted.`);
+    });
+    multiBar.append(clearBtn, delBtn);
+    root.appendChild(toolbar);
+    root.appendChild(multiBar);
+  } else {
+    root.appendChild(toolbar);
+  }
 
   // ── File list ────────────────────────────────────────────────────────────────
   const list = document.createElement("div");
@@ -1455,6 +1623,7 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   for (const entry of visible) {
     const kind = sftpIconKind(entry);
     const isSelected = tab.sftpSelected === entry.name;
+    const isMultiSelected = tab.multiSelected.has(entry.name);
     const isHidden = entry.name.startsWith(".");
     const row = document.createElement("div");
     row.className =
@@ -1462,6 +1631,7 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
       (entry.isDir ? " sftp-row--dir" : "") +
       (entry.isSymlink ? " sftp-row--symlink" : "") +
       (isSelected ? " sftp-row--selected" : "") +
+      (isMultiSelected ? " sftp-row--multi-selected" : "") +
       (isHidden ? " sftp-row--hidden" : "");
     row.dataset.name = entry.name;
     row.dataset.isdir = String(entry.isDir);
@@ -1531,7 +1701,7 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
     }
   });
 
-  root.append(toolbar, colHeader, list, statusBar);
+  root.append(colHeader, list, statusBar);
 
   // ── Event wiring ─────────────────────────────────────────────────────────────
   upBtn.addEventListener("click", () => {
@@ -1539,7 +1709,7 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
     void sftpNavigate(connId, tab.tabId, parent);
   });
 
-  breadcrumb.querySelectorAll<HTMLButtonElement>(".sftp-crumb-btn").forEach((btn) => {
+  breadcrumbOrInput.querySelectorAll<HTMLButtonElement>(".sftp-crumb-btn").forEach((btn) => {
     btn.addEventListener("click", () =>
       sftpNavigate(connId, tab.tabId, btn.dataset.path!),
     );
@@ -1597,10 +1767,21 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   );
 
   list.querySelectorAll<HTMLElement>(".sftp-row").forEach((row) => {
-    row.addEventListener("click", () => {
+    row.addEventListener("click", (e) => {
       const name = row.dataset.name!;
       if (name === "..") return;
-      tab.sftpSelected = tab.sftpSelected === name ? null : name;
+      if (e.ctrlKey || e.metaKey) {
+        // Ctrl+click: toggle multi-select
+        if (tab.multiSelected.has(name)) {
+          tab.multiSelected.delete(name);
+        } else {
+          tab.multiSelected.add(name);
+        }
+        tab.sftpSelected = name;
+      } else {
+        tab.multiSelected.clear();
+        tab.sftpSelected = tab.sftpSelected === name ? null : name;
+      }
       if (selectedId === connId) {
         const c = connections.find((c) => c.id === connId);
         if (c) renderTerminalDetail(c);
@@ -1724,6 +1905,17 @@ function renderTerminalDetail(conn: Connection): void {
         switchTermTab(conn.id, tab.tabId);
       }
     });
+    // Double-click label to rename tab
+    const labelEl = tabEl.querySelector<HTMLElement>(".term-tab-label")!;
+    labelEl.addEventListener("dblclick", async (e) => {
+      e.stopPropagation();
+      const newName = await showPrompt("Rename tab:", tab.label);
+      if (newName && newName !== tab.label) {
+        tab.label = newName;
+        const c = connections.find((c) => c.id === conn.id);
+        if (c) renderTerminalDetail(c);
+      }
+    });
     tabBar.appendChild(tabEl);
   }
 
@@ -1796,6 +1988,58 @@ function renderTerminalDetail(conn: Connection): void {
 
   view.appendChild(tabBar);
 
+  // Search bar — shown when active tab has searchVisible=true
+  const activeTab = state.tabs.find((t) => t.tabId === state.activeTabId);
+  if (activeTab?.type === "term" && activeTab.searchVisible) {
+    const searchBar = document.createElement("div");
+    searchBar.className = "term-search-bar";
+    const searchInput = document.createElement("input");
+    searchInput.type = "text";
+    searchInput.className = "term-search-input";
+    searchInput.placeholder = "Search terminal…";
+    const countEl = document.createElement("span");
+    countEl.className = "term-search-count";
+    const prevBtn = document.createElement("button");
+    prevBtn.className = "term-search-btn";
+    prevBtn.textContent = "↑";
+    prevBtn.title = "Previous";
+    const nextBtn = document.createElement("button");
+    nextBtn.className = "term-search-btn";
+    nextBtn.textContent = "↓";
+    nextBtn.title = "Next";
+    const closeBtn = document.createElement("button");
+    closeBtn.className = "term-search-btn";
+    closeBtn.textContent = "✕";
+    closeBtn.title = "Close search";
+    searchBar.append(searchInput, countEl, prevBtn, nextBtn, closeBtn);
+    view.appendChild(searchBar);
+    const doSearch = (dir: "next" | "prev") => {
+      const q = searchInput.value;
+      if (!q || !activeTab.searchAddon) return;
+      if (dir === "next") activeTab.searchAddon.findNext(q);
+      else activeTab.searchAddon.findPrevious(q);
+    };
+    searchInput.addEventListener("input", () => doSearch("next"));
+    searchInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") doSearch(e.shiftKey ? "prev" : "next");
+      if (e.key === "Escape") {
+        activeTab.searchVisible = false;
+        activeTab.searchAddon?.clearDecorations();
+        const c = connections.find((c) => c.id === conn.id);
+        if (c) renderTerminalDetail(c);
+      }
+    });
+    prevBtn.addEventListener("click", () => doSearch("prev"));
+    nextBtn.addEventListener("click", () => doSearch("next"));
+    closeBtn.addEventListener("click", () => {
+      activeTab.searchVisible = false;
+      activeTab.searchAddon?.clearDecorations();
+      const c = connections.find((c) => c.id === conn.id);
+      if (c) renderTerminalDetail(c);
+    });
+    requestAnimationFrame(() => searchInput.focus());
+  }
+
   // Panel area — re-attach persistent terminal divs, build sftp panels inline
   const panelsEl = document.createElement("div");
   panelsEl.className = "term-panels";
@@ -1823,10 +2067,11 @@ function renderTerminalDetail(conn: Connection): void {
       }
       panelsEl.appendChild(tab.el);
     } else {
-      const sftpEl = renderSftpPanel(conn.id, tab);
-      sftpEl.classList.add("term-panel");
-      sftpEl.classList.toggle("active", tab.tabId === state.activeTabId);
-      panelsEl.appendChild(sftpEl);
+      const sftpWrapper = document.createElement("div");
+      sftpWrapper.className = "term-panel";
+      sftpWrapper.classList.toggle("active", tab.tabId === state.activeTabId);
+      sftpWrapper.appendChild(renderSftpPanel(conn.id, tab));
+      panelsEl.appendChild(sftpWrapper);
     }
   }
 
@@ -1839,18 +2084,100 @@ function renderTerminalDetail(conn: Connection): void {
 
 // ─── Sidebar ──────────────────────────────────────────────────────────────────
 
+function makeSidebarItem(conn: Connection, pinnedIds: Set<string>): HTMLElement {
+  const status = getStatus(conn.id);
+  const isPinned = pinnedIds.has(conn.id);
+  const item = document.createElement("div");
+  item.className = `tunnel-item ${status}${selectedId === conn.id && !settingsView ? " active" : ""}${isPinned ? " pinned" : ""}`;
+  item.dataset.id = conn.id;
+  item.innerHTML = `
+    <div class="tunnel-icon">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="2" y="2" width="20" height="8" rx="2"/>
+        <rect x="2" y="14" width="20" height="8" rx="2"/>
+        <line x1="6" y1="6" x2="6.01" y2="6"/>
+        <line x1="6" y1="18" x2="6.01" y2="18"/>
+      </svg>
+      <span class="tunnel-status-dot"></span>
+    </div>
+    <div class="tunnel-item-info">
+      <div class="tunnel-item-name">${escapeHtml(conn.friendlyName || conn.hostname)}</div>
+      <div class="tunnel-item-host">${escapeHtml(conn.hostname)}</div>
+    </div>
+    <button class="pin-btn" title="${isPinned ? "Unpin" : "Pin"}">${isPinned ? "★" : "☆"}</button>
+  `;
+  item.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).classList.contains("pin-btn")) return;
+    if (selectedId !== conn.id || settingsView) {
+      debugMode = false;
+      stopDebugPoll();
+    }
+    settingsView = false;
+    selectedId = conn.id;
+    renderSidebar();
+    renderDetail();
+  });
+  const pinBtn = item.querySelector<HTMLButtonElement>(".pin-btn")!;
+  pinBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    void togglePin(conn.id);
+  });
+  makeSidebarItemDraggable(item, conn.id);
+
+  item.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    showDropdownMenu(e.clientX, e.clientY, [
+      {
+        label: isPinned ? "Unpin" : "Pin to top",
+        action: () => void togglePin(conn.id),
+      },
+      { separator: true },
+      { label: "Edit", action: () => window.api.openFormWindow(conn.id) },
+      {
+        label: "Duplicate",
+        action: () => void handleAction("duplicate", conn.id),
+      },
+      { separator: true },
+      {
+        label: "Delete",
+        action: () => void handleAction("delete", conn.id),
+      },
+    ]);
+  });
+  return item;
+}
+
+async function togglePin(connId: string): Promise<void> {
+  if (!currentSettings) return;
+  const current = currentSettings.pinnedIds ?? [];
+  const next = current.includes(connId)
+    ? current.filter((x) => x !== connId)
+    : [...current, connId];
+  try {
+    currentSettings = await window.api.saveSettings({ pinnedIds: next });
+    renderSidebar();
+  } catch {
+    showToast("Could not update pin.", "error");
+  }
+}
+
 function renderSidebar() {
   sidebarList.innerHTML = "";
 
+  const pinnedIds = new Set(currentSettings?.pinnedIds ?? []);
+
+  // Temp connections don't appear in the sidebar (they're quick-connect sessions)
+  const visibleConns = connections.filter((c) => !c.temp);
+
   const query = searchQuery.trim().toLowerCase();
   const filtered = query
-    ? connections.filter(
+    ? visibleConns.filter(
         (c) =>
           (c.friendlyName || "").toLowerCase().includes(query) ||
           c.hostname.toLowerCase().includes(query) ||
           (c.group || "").toLowerCase().includes(query),
       )
-    : connections;
+    : visibleConns;
 
   if (filtered.length === 0) {
     if (connections.length === 0) {
@@ -1864,9 +2191,27 @@ function renderSidebar() {
     return;
   }
 
-  // Group connections.
+  // Pinned connections first, then grouped.
+  const pinned = filtered.filter((c) => pinnedIds.has(c.id));
+  const unpinned = filtered.filter((c) => !pinnedIds.has(c.id));
+
+  if (pinned.length > 0) {
+    const hdr = document.createElement("div");
+    hdr.className = "sidebar-section-label";
+    hdr.textContent = "Pinned";
+    sidebarList.appendChild(hdr);
+    for (const conn of pinned) sidebarList.appendChild(makeSidebarItem(conn, pinnedIds));
+    if (unpinned.length > 0) {
+      const hdr2 = document.createElement("div");
+      hdr2.className = "sidebar-section-label";
+      hdr2.textContent = "All Tunnels";
+      sidebarList.appendChild(hdr2);
+    }
+  }
+
+  // Group connections (unpinned only).
   const groups: Map<string, Connection[]> = new Map();
-  for (const conn of filtered) {
+  for (const conn of unpinned) {
     const g = conn.group || "";
     if (!groups.has(g)) groups.set(g, []);
     groups.get(g)!.push(conn);
@@ -1908,36 +2253,7 @@ function renderSidebar() {
     }
 
     for (const conn of groupConns) {
-      const status = getStatus(conn.id);
-      const item = document.createElement("div");
-      item.className = `tunnel-item ${status}${selectedId === conn.id && !settingsView ? " active" : ""}`;
-      item.dataset.id = conn.id;
-      item.innerHTML = `
-        <div class="tunnel-icon">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="2" y="2" width="20" height="8" rx="2"/>
-            <rect x="2" y="14" width="20" height="8" rx="2"/>
-            <line x1="6" y1="6" x2="6.01" y2="6"/>
-            <line x1="6" y1="18" x2="6.01" y2="18"/>
-          </svg>
-          <span class="tunnel-status-dot"></span>
-        </div>
-        <div class="tunnel-item-info">
-          <div class="tunnel-item-name">${escapeHtml(conn.friendlyName || conn.hostname)}</div>
-          <div class="tunnel-item-host">${escapeHtml(conn.hostname)}</div>
-        </div>
-      `;
-      item.addEventListener("click", () => {
-        if (selectedId !== conn.id || settingsView) {
-          debugMode = false;
-          stopDebugPoll();
-        }
-        settingsView = false;
-        selectedId = conn.id;
-        renderSidebar();
-        renderDetail();
-      });
-      sidebarList.appendChild(item);
+      sidebarList.appendChild(makeSidebarItem(conn, pinnedIds));
     }
   }
 
@@ -2023,6 +2339,20 @@ function renderDetail() {
          </div>`
     : "";
 
+  const uptimeMs = isConnected ? sessionConnectedAt.get(conn.id) : undefined;
+  const uptimeChip = uptimeMs
+    ? `<span class="uptime-chip" id="uptime-chip-${conn.id}">${formatUptime(Math.floor((Date.now() - uptimeMs) / 1000))}</span>`
+    : "";
+
+  const isHttpProto = proto === "http" || proto === "https";
+  const httpTestBtn = isHttpProto
+    ? `<button class="cmd-btn" data-action="test-http" data-id="${conn.id}">⚡ Test</button>`
+    : "";
+
+  const jumpRow = conn.jumpHost
+    ? `<div class="prop-row"><span class="prop-label">Jump Host</span><span class="prop-value mono">${escapeHtml(conn.jumpHost)}:${conn.jumpPort ?? 22}</span></div>`
+    : "";
+
   detailPanel.innerHTML = `
     <div class="detail-header">
       <div class="detail-title-row">
@@ -2031,18 +2361,23 @@ function renderDetail() {
           <span class="status-dot"></span>
           ${rdpIsDown ? "RDP Disconnected" : statusLabel(status)}
         </span>
+        ${uptimeChip}
       </div>
       ${conn.friendlyName ? `<div class="detail-subtitle">${escapeHtml(conn.hostname)}</div>` : ""}
     </div>
 
     <div class="command-bar">
       ${connectActions}
+      ${httpTestBtn}
       <button class="cmd-btn" data-action="edit" data-id="${conn.id}">${svgEdit} Edit</button>
+      <button class="cmd-btn" data-action="duplicate" data-id="${conn.id}">⧉ Duplicate</button>
       <div class="cmd-separator"></div>
       <button class="cmd-btn cmd-danger" data-action="delete" data-id="${conn.id}">${svgTrash} Delete</button>
       <div class="cmd-separator"></div>
       <button class="cmd-btn cmd-debug${debugMode ? " active" : ""}" data-action="toggle-debug" data-id="${conn.id}">${svgActivity} Debug</button>
     </div>
+
+    ${isHttpProto ? `<div id="http-test-result-${conn.id}" class="http-test-result" style="padding:0 16px 8px"></div>` : ""}
 
     ${
       authUrl
@@ -2077,6 +2412,7 @@ function renderDetail() {
           : ""
       }
       ${sshKeyRow}
+      ${jumpRow}
       ${conn.group ? `<div class="prop-row"><span class="prop-label">Group</span><span class="prop-value">${escapeHtml(conn.group)}</span></div>` : ""}
     </div>
 
@@ -2172,6 +2508,16 @@ function renderSettingsPanel() {
       <div class="settings-list">
         <div class="settings-row">
           <div class="settings-row-label">
+            <span class="settings-label">Theme</span>
+          </div>
+          <select class="form-input settings-select" id="s-theme">
+            <option value="dark" ${(s.theme ?? "dark") === "dark" ? "selected" : ""}>Dark (default)</option>
+            <option value="light" ${s.theme === "light" ? "selected" : ""}>Light</option>
+            <option value="system" ${s.theme === "system" ? "selected" : ""}>System</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
             <span class="settings-label">Minimize to tray on close</span>
             <span class="settings-desc">Keep TunnelDesk running in the background when you close the window.</span>
           </div>
@@ -2187,6 +2533,16 @@ function renderSettingsPanel() {
           </div>
           <label class="toggle">
             <input type="checkbox" id="s-start-minimized" ${s.startMinimized ? "checked" : ""}>
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Auto-reconnect terminal</span>
+            <span class="settings-desc">Automatically retry when an SSH or Telnet session drops unexpectedly (up to 3 attempts).</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="s-auto-reconnect" ${(s.autoReconnect ?? true) ? "checked" : ""}>
             <span class="toggle-track"></span>
           </label>
         </div>
@@ -2215,6 +2571,35 @@ function renderSettingsPanel() {
             <button type="button" class="btn btn-secondary btn-sm" id="s-cf-browse">Browse</button>
             <button type="button" class="btn btn-ghost btn-sm" id="s-cf-clear" title="Reset to PATH">&times;</button>
           </div>
+        </div>
+        <div class="settings-row settings-row--col">
+          <div class="settings-row-label">
+            <span class="settings-label">Default SFTP download folder</span>
+            <span class="settings-desc">Pre-fills the save dialog when downloading files via SFTP. Leave empty to use the system default.</span>
+          </div>
+          <div class="form-file-row" style="margin-top:8px">
+            <input class="form-input" type="text" id="s-sftp-dl" placeholder="e.g. ${window.api.platform === "win32" ? "C:\\Users\\You\\Downloads" : "~/Downloads"}" value="${escapeHtml(s.sftpDownloadFolder)}" autocomplete="off" />
+            <button type="button" class="btn btn-secondary btn-sm" id="s-sftp-dl-browse">Browse</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="s-sftp-dl-clear" title="Clear">&times;</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="prop-section-label" style="margin-top:22px">Backup</div>
+      <div class="settings-list">
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Export connections</span>
+            <span class="settings-desc">Save all tunnels to a JSON file (passwords not included).</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="s-export">Export…</button>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Import connections</span>
+            <span class="settings-desc">Load tunnels from a previously exported JSON file.</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="s-import">Import…</button>
         </div>
       </div>
 
@@ -2268,6 +2653,41 @@ function renderSettingsPanel() {
     await window.api.openLogFolder();
   });
 
+  const sftpDlInput = document.getElementById("s-sftp-dl") as HTMLInputElement;
+  document.getElementById("s-sftp-dl-browse")!.addEventListener("click", async () => {
+    const picked = await window.api.pickFile({ title: "Select default download folder" });
+    if (picked) {
+      // Use the folder containing the picked file as the download folder.
+      const parts = picked.replace(/\\/g, "/").split("/");
+      parts.pop();
+      sftpDlInput.value = parts.join("/") || picked;
+    }
+  });
+  document.getElementById("s-sftp-dl-clear")!.addEventListener("click", () => {
+    sftpDlInput.value = "";
+  });
+
+  document.getElementById("s-export")!.addEventListener("click", async () => {
+    try {
+      const res = await window.api.exportConnections();
+      if (!res.canceled) showToast(`Exported ${res.count} tunnel${res.count !== 1 ? "s" : ""}.`, "success");
+    } catch (err) {
+      showToast(errorMsg(err, "Export failed."), "error");
+    }
+  });
+
+  document.getElementById("s-import")!.addEventListener("click", async () => {
+    try {
+      const res = await window.api.importConnections();
+      if (!res.canceled) {
+        showToast(`Imported ${res.added} tunnel${res.added !== 1 ? "s" : ""}.`, "success");
+        await refreshConnections();
+      }
+    } catch (err) {
+      showToast(errorMsg(err, "Import failed."), "error");
+    }
+  });
+
   document.getElementById("s-save")!.addEventListener("click", async () => {
     const minTray = (document.getElementById("s-minimize-tray") as HTMLInputElement)
       .checked;
@@ -2279,6 +2699,9 @@ function renderSettingsPanel() {
     const logDays =
       parseInt((document.getElementById("s-log-retention") as HTMLInputElement).value) ||
       30;
+    const sftpDl = (document.getElementById("s-sftp-dl") as HTMLInputElement)?.value.trim() ?? "";
+    const theme = (document.getElementById("s-theme") as HTMLSelectElement)?.value as "dark" | "light" | "system" ?? "dark";
+    const autoReconnect = (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
     try {
       currentSettings = await window.api.saveSettings({
         minimizeToTray: minTray,
@@ -2286,7 +2709,11 @@ function renderSettingsPanel() {
         defaultProtocol: defProto,
         cloudflaredPath: cfPath,
         logRetentionDays: logDays,
+        sftpDownloadFolder: sftpDl,
+        theme,
+        autoReconnect,
       });
+      applyTheme(theme);
       showToast("Settings saved.", "success");
     } catch {
       showToast("Failed to save settings.", "error");
@@ -2350,6 +2777,26 @@ async function handleAction(action: string, id: string, value?: string) {
     } catch (err) {
       showToast(errorMsg(err, "Delete failed."), "error");
     }
+  } else if (action === "duplicate") {
+    const conn = connections.find((c) => c.id === id);
+    if (!conn) return;
+    try {
+      await window.api.saveConnection({
+        friendlyName: `${conn.friendlyName || conn.hostname} (copy)`,
+        hostname: conn.hostname,
+        port: conn.port,
+        protocol: conn.protocol,
+        username: conn.username,
+        notes: conn.notes,
+        group: conn.group,
+        sshKeyPath: conn.sshKeyPath,
+      });
+      connections = await window.api.loadConnections();
+      renderSidebar();
+      showToast("Tunnel duplicated.", "success");
+    } catch (err) {
+      showToast(errorMsg(err, "Duplicate failed."), "error");
+    }
   } else if (action === "reconnect-rdp") {
     appendLog(`Reconnecting RDP — ${connName(id)}`);
     try {
@@ -2377,6 +2824,28 @@ async function handleAction(action: string, id: string, value?: string) {
       showToast(`Copied ${endpoint}`, "success");
     } catch {
       showToast("Failed to copy.", "error");
+    }
+  } else if (action === "test-http") {
+    const conn = connections.find((c) => c.id === id);
+    if (!conn) return;
+    const url = `${conn.protocol}://${conn.hostname}:${conn.port}`;
+    const resultEl = document.getElementById(`http-test-result-${id}`);
+    if (resultEl) resultEl.textContent = "Testing…";
+    try {
+      const res = await window.api.testHttp(url);
+      const isOk = res.statusCode !== null && res.statusCode < 500;
+      const msg = res.error
+        ? `Error: ${res.error} (${res.timeMs}ms)`
+        : `HTTP ${res.statusCode} · ${res.timeMs}ms`;
+      if (resultEl) {
+        resultEl.textContent = msg;
+        resultEl.className = `http-test-result ${isOk ? "ok" : "err"}`;
+      }
+    } catch (err) {
+      if (resultEl) {
+        resultEl.textContent = errorMsg(err, "Test failed.");
+        resultEl.className = "http-test-result err";
+      }
     }
   } else if (action === "open-auth-url") {
     if (value) void window.api.openExternal(value);
@@ -2484,6 +2953,8 @@ saveForm.addEventListener("submit", async (e) => {
     notes: notesInput.value.trim(),
     group: groupInput.value.trim(),
     sshKeyPath: sshKeyPathInput.value.trim(),
+    jumpHost: (document.getElementById("jump-host") as HTMLInputElement)?.value.trim() || undefined,
+    jumpPort: Number((document.getElementById("jump-port") as HTMLInputElement)?.value) || 22,
   };
 
   if (!conn.hostname) {
@@ -2513,6 +2984,15 @@ searchInput.addEventListener("input", () => {
   renderSidebar();
 });
 
+searchInput.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    searchInput.value = "";
+    searchQuery = "";
+    renderSidebar();
+    searchInput.blur();
+  }
+});
+
 // ─── Settings button ──────────────────────────────────────────────────────────
 
 settingsBtn.addEventListener("click", async () => {
@@ -2535,6 +3015,16 @@ settingsBtn.addEventListener("click", async () => {
 document.addEventListener("keydown", (e) => {
   if (isModalOpen() || isEditing()) return;
 
+  if (e.key === "?" && !e.ctrlKey && !e.altKey) {
+    e.preventDefault();
+    showShortcutsOverlay();
+    return;
+  }
+  if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) {
+    e.preventDefault();
+    document.getElementById("quick-connect")?.click();
+    return;
+  }
   if (e.ctrlKey && e.key === "n") {
     e.preventDefault();
     window.api.openFormWindow();
@@ -2581,6 +3071,18 @@ function navigateSidebar(direction: 1 | -1) {
 async function refreshConnections() {
   try {
     connections = await window.api.loadConnections();
+    // Apply custom order if set, hide temp connections from sidebar
+    const order = currentSettings?.connectionOrder ?? [];
+    if (order.length > 0) {
+      connections = connections.sort((a, b) => {
+        const ai = order.indexOf(a.id);
+        const bi = order.indexOf(b.id);
+        if (ai === -1 && bi === -1) return 0;
+        if (ai === -1) return 1;
+        if (bi === -1) return -1;
+        return ai - bi;
+      });
+    }
     const loaded = await window.api.getStatuses();
     for (const key of Object.keys(statuses)) delete statuses[key];
     Object.assign(statuses, loaded);
@@ -2644,16 +3146,23 @@ if (!IS_TERMINAL_WINDOW) {
     if (data.status === "disconnected") {
       rdpClosed.delete(data.id);
       authPendingUrls.delete(data.id);
+      sessionConnectedAt.delete(data.id);
       if (data.id === selectedId) {
         stopDebugPoll();
         if (debugMode) setLiveIndicator("not connected", "dim");
       }
-      if (prev === "connecting") appendLog(`Connection failed — ${connName(data.id)}`);
-      else if (prev === "connected")
+      if (prev === "connecting") {
+        appendLog(`Connection failed — ${connName(data.id)}`);
+        void window.api.showNotification("TunnelDesk", `Connection failed — ${connName(data.id)}`);
+      } else if (prev === "connected") {
         appendLog(`Tunnel disconnected — ${connName(data.id)}`);
+        void window.api.showNotification("TunnelDesk", `Disconnected — ${connName(data.id)}`);
+      }
     } else if (data.status === "connected" && prev !== "connected") {
       authPendingUrls.delete(data.id);
+      sessionConnectedAt.set(data.id, Date.now());
       appendLog(`Tunnel connected — ${connName(data.id)}`);
+      void window.api.showNotification("TunnelDesk", `Connected — ${connName(data.id)}`);
     }
     renderSidebar();
     renderDetail();
@@ -2720,7 +3229,7 @@ window.api.onSshData(({ sid, data }) => {
   if (!loc) return;
   const state = termState.get(loc.connId);
   const tab = state?.tabs.find((t) => t.tabId === loc.tabId);
-  if (tab?.term) tab.term.write(atob(data));
+  if (tab?.term) tab.term.write(Uint8Array.from(atob(data), (c) => c.charCodeAt(0)));
 });
 
 window.api.onSshClose(({ sid }) => {
@@ -2747,6 +3256,32 @@ window.api.onSshClose(({ sid }) => {
     if (!hasOpen) void window.api.sshReportStatus(loc.connId, false);
   }
   if (selectedId === loc.connId && conn) renderTerminalDetail(conn);
+
+  // Auto-reconnect: if not cancelled by user and auto-reconnect is enabled
+  const maxAttempts = currentSettings?.autoReconnectAttempts ?? 3;
+  if (
+    currentSettings?.autoReconnect &&
+    !tab.cancelled &&
+    tab.type === "term" &&
+    tab.reconnectAttempt < maxAttempts
+  ) {
+    const attempt = tab.reconnectAttempt + 1;
+    const delay = attempt === 1 ? 3000 : attempt === 2 ? 8000 : 20000;
+    tab.reconnecting = true;
+    tab.reconnectAttempt = attempt;
+    if (tab.term)
+      tab.term.write(
+        `\r\n\x1b[33mReconnecting (${attempt}/${maxAttempts}) in ${delay / 1000}s…\x1b[0m\r\n`,
+      );
+    tab.reconnectTimer = setTimeout(async () => {
+      if (tab.cancelled) return;
+      tab.closed = false;
+      tab.reconnecting = false;
+      // Reopen a fresh term tab replacing this one
+      closeTermTab(loc.connId, loc.tabId);
+      void addTermTab(loc.connId, "term");
+    }, delay);
+  }
 });
 
 // ─── Utils ────────────────────────────────────────────────────────────────────
@@ -2817,6 +3352,10 @@ async function initFormWindow(connId: string | null): Promise<void> {
           ? "Leave empty to keep existing"
           : "Leave empty if key has no passphrase";
         notesInput.value = conn.notes || "";
+        const jumpHostEl = document.getElementById("jump-host") as HTMLInputElement | null;
+        const jumpPortEl = document.getElementById("jump-port") as HTMLInputElement | null;
+        if (jumpHostEl) jumpHostEl.value = conn.jumpHost || "";
+        if (jumpPortEl) jumpPortEl.value = String(conn.jumpPort ?? 22);
         updateSshKeyVisibility();
         formTitle.textContent = "Edit Tunnel";
       }
@@ -2857,13 +3396,180 @@ async function initTerminalWindow(connId: string): Promise<void> {
   await addTermTab(connId, "term");
 }
 
+// ─── Sidebar resize ───────────────────────────────────────────────────────────
+
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+  const sidebarResizeHandle = document.getElementById("sidebar-resize-handle");
+  const sidebarEl = document.querySelector<HTMLElement>(".sidebar");
+  if (sidebarResizeHandle && sidebarEl) {
+    let resizing = false;
+    let startX = 0;
+    let startW = 0;
+    sidebarResizeHandle.addEventListener("mousedown", (e) => {
+      resizing = true;
+      startX = e.clientX;
+      startW = sidebarEl.offsetWidth;
+      sidebarResizeHandle.classList.add("dragging");
+      document.body.style.cursor = "col-resize";
+      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect = "none";
+      e.preventDefault();
+    });
+    document.addEventListener("mousemove", (e) => {
+      if (!resizing) return;
+      const w = Math.max(180, Math.min(420, startW + e.clientX - startX));
+      document.documentElement.style.setProperty("--sidebar-w", `${w}px`);
+    });
+    document.addEventListener("mouseup", () => {
+      if (!resizing) return;
+      resizing = false;
+      sidebarResizeHandle.classList.remove("dragging");
+      document.body.style.cursor = "";
+      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect = "";
+    });
+  }
+}
+
+// ─── Keyboard shortcuts overlay ───────────────────────────────────────────────
+
+function showShortcutsOverlay() {
+  const overlay = document.createElement("div");
+  overlay.className = "shortcuts-overlay";
+  overlay.innerHTML = `
+    <div class="shortcuts-box">
+      <div class="shortcuts-title">Keyboard Shortcuts</div>
+      <div class="shortcuts-section">Navigation</div>
+      <div class="shortcut-row"><span>Select tunnel</span><kbd>↑ / ↓</kbd></div>
+      <div class="shortcut-row"><span>New tunnel</span><kbd>Ctrl+N</kbd></div>
+      <div class="shortcut-row"><span>Quick Connect</span><kbd>Ctrl+Shift+O</kbd></div>
+      <div class="shortcut-row"><span>Settings</span><kbd>Click ⚙</kbd></div>
+      <div class="shortcut-row"><span>Clear search</span><kbd>Esc</kbd></div>
+      <div class="shortcuts-section">Connection</div>
+      <div class="shortcut-row"><span>Connect / Disconnect</span><kbd>Enter</kbd></div>
+      <div class="shortcut-row"><span>Delete tunnel</span><kbd>Delete</kbd></div>
+      <div class="shortcut-row"><span>Toggle debug</span><kbd>Ctrl+D</kbd></div>
+      <div class="shortcuts-section">Terminal</div>
+      <div class="shortcut-row"><span>Copy selection</span><kbd>Ctrl+Shift+C</kbd></div>
+      <div class="shortcut-row"><span>Paste</span><kbd>Ctrl+Shift+V</kbd></div>
+      <div class="shortcut-row"><span>Search</span><kbd>Ctrl+F</kbd></div>
+      <div class="shortcut-row"><span>Zoom in / out</span><kbd>Ctrl+= / Ctrl+-</kbd></div>
+      <div class="shortcut-row"><span>Reset zoom</span><kbd>Ctrl+0</kbd></div>
+      <div class="shortcut-row"><span>Rename tab</span><kbd>Double-click tab</kbd></div>
+      <div class="shortcuts-section">Other</div>
+      <div class="shortcut-row"><span>This help</span><kbd>?</kbd></div>
+    </div>
+  `;
+  const close = () => { if (document.body.contains(overlay)) document.body.removeChild(overlay); };
+  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
+  overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  document.body.appendChild(overlay);
+  (overlay as HTMLElement).setAttribute("tabindex", "-1");
+  (overlay as HTMLElement).focus();
+}
+
+// ─── Quick Connect ────────────────────────────────────────────────────────────
+
+const quickConnectModal = document.getElementById("quick-connect-modal") as HTMLElement;
+const qcForm = document.getElementById("qc-form") as HTMLFormElement;
+const qcProto = document.getElementById("qc-protocol") as HTMLSelectElement;
+const qcHost = document.getElementById("qc-host") as HTMLInputElement;
+const qcPort = document.getElementById("qc-port") as HTMLInputElement;
+
+if (quickConnectModal) {
+  const openQc = () => {
+    quickConnectModal.classList.remove("hidden");
+    quickConnectModal.offsetHeight;
+    quickConnectModal.classList.add("open");
+    setTimeout(() => qcHost?.focus(), 50);
+  };
+  const closeQc = () => {
+    quickConnectModal.classList.remove("open");
+    setTimeout(() => quickConnectModal.classList.add("hidden"), 160);
+  };
+
+  document.getElementById("quick-connect")?.addEventListener("click", openQc);
+  document.getElementById("qc-cancel")?.addEventListener("click", closeQc);
+  document.getElementById("qc-cancel-top")?.addEventListener("click", closeQc);
+  quickConnectModal.addEventListener("click", (e) => { if (e.target === quickConnectModal) closeQc(); });
+
+  qcProto?.addEventListener("change", () => {
+    if (qcPort) qcPort.value = String(PROTOCOL_DEFAULT_PORTS[qcProto.value] ?? 22);
+  });
+
+  qcForm?.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const host = qcHost?.value.trim();
+    if (!host) { showToast("Host is required.", "error"); return; }
+    const proto = qcProto?.value || "ssh";
+    const port = Number(qcPort?.value) || 22;
+    const user = (document.getElementById("qc-user") as HTMLInputElement)?.value.trim();
+    const pass = (document.getElementById("qc-pass") as HTMLInputElement)?.value;
+    closeQc();
+    try {
+      const saved = await window.api.saveConnection({
+        friendlyName: `${host} (quick)`,
+        hostname: host,
+        port,
+        protocol: proto,
+        username: user || undefined,
+        password: pass || undefined,
+        temp: true,
+      } as Parameters<typeof window.api.saveConnection>[0] & { temp?: boolean });
+      await refreshConnections();
+      selectedId = saved.id;
+      renderSidebar();
+      renderDetail();
+      await handleAction("connect", saved.id);
+    } catch (err) {
+      showToast(errorMsg(err, "Quick connect failed."), "error");
+    }
+  });
+}
+
+// ─── Drag-to-reorder connections ──────────────────────────────────────────────
+
+let dragSrcId: string | null = null;
+
+function makeSidebarItemDraggable(item: HTMLElement, connId: string) {
+  item.setAttribute("draggable", "true");
+  item.addEventListener("dragstart", (e) => {
+    dragSrcId = connId;
+    e.dataTransfer!.effectAllowed = "move";
+  });
+  item.addEventListener("dragover", (e) => {
+    e.preventDefault();
+    item.classList.add("drag-over");
+  });
+  item.addEventListener("dragleave", () => item.classList.remove("drag-over"));
+  item.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    item.classList.remove("drag-over");
+    if (!dragSrcId || dragSrcId === connId) return;
+    const ids = connections.map((c) => c.id);
+    const from = ids.indexOf(dragSrcId);
+    const to = ids.indexOf(connId);
+    if (from === -1 || to === -1) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, dragSrcId);
+    connections = connections.slice().sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+    dragSrcId = null;
+    renderSidebar();
+    try {
+      await window.api.saveSettings({ connectionOrder: ids });
+      if (currentSettings) currentSettings.connectionOrder = ids;
+    } catch {}
+  });
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 async function init() {
   try {
     currentSettings = await window.api.getSettings();
   } catch {}
+  applyTheme(currentSettings?.theme ?? "dark");
   await refreshConnections();
+  // Clean up any leftover temp connections from a previous crash
+  void window.api.deleteTempConnections();
 }
 
 if (TERM_WIN_CONN_ID) {
