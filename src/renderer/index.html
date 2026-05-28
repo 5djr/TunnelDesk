@@ -18,6 +18,10 @@
           <span class="brand-name">TunnelDesk</span>
         </div>
 
+        <button class="nav-new-btn" id="quick-connect" title="Quick Connect (Ctrl+Shift+O)">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          Quick Connect
+        </button>
         <button class="nav-new-btn" id="new-connection">
           <svg
             width="14"
@@ -86,6 +90,9 @@
           </button>
         </div>
       </aside>
+
+      <!-- Sidebar resize handle -->
+      <div class="sidebar-resize-handle" id="sidebar-resize-handle"></div>
 
       <!-- Main -->
       <div class="main">
@@ -236,13 +243,18 @@
             </div>
             <div class="form-group">
               <label class="form-label" for="cred-password">Password</label>
-              <input
-                class="form-input"
-                type="password"
-                id="cred-password"
-                placeholder="••••••••"
-                autocomplete="new-password"
-              />
+              <div class="form-input-reveal-wrap">
+                <input
+                  class="form-input"
+                  type="password"
+                  id="cred-password"
+                  placeholder="••••••••"
+                  autocomplete="new-password"
+                />
+                <button type="button" class="input-reveal-btn" id="toggle-password" title="Show/hide password" tabindex="-1">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12S5 4 12 4s11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+                </button>
+              </div>
             </div>
           </div>
           <!-- SSH key — shown only for ssh / ssh-cf protocols -->
@@ -274,14 +286,49 @@
             <label class="form-label" for="ssh-key-passphrase" style="margin-top: 10px"
               >Key Passphrase <span class="form-optional">optional</span></label
             >
-            <input
-              class="form-input"
-              type="password"
-              id="ssh-key-passphrase"
-              placeholder="Leave empty if key has no passphrase"
-              autocomplete="new-password"
-            />
+            <div class="form-input-reveal-wrap">
+              <input
+                class="form-input"
+                type="password"
+                id="ssh-key-passphrase"
+                placeholder="Leave empty if key has no passphrase"
+                autocomplete="new-password"
+              />
+              <button type="button" class="input-reveal-btn" id="toggle-passphrase" title="Show/hide passphrase" tabindex="-1">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12S5 4 12 4s11 8 11 8-4 8-11 8S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+              </button>
+            </div>
           </div>
+          <!-- Jump host — shown only for ssh / ssh-cf protocols -->
+          <div class="form-group" id="jump-host-group" style="display: none">
+            <div class="form-section-label">
+              Jump Host / Bastion <span class="form-optional">optional</span>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="jump-host">Jump Host</label>
+                <input
+                  class="form-input"
+                  type="text"
+                  id="jump-host"
+                  placeholder="e.g. bastion.example.com"
+                  autocomplete="off"
+                />
+              </div>
+              <div class="form-group" style="max-width: 120px">
+                <label class="form-label" for="jump-port">Port</label>
+                <input
+                  class="form-input"
+                  type="number"
+                  id="jump-port"
+                  value="22"
+                  min="1"
+                  max="65535"
+                />
+              </div>
+            </div>
+          </div>
+
           <div class="form-group">
             <label class="form-label" for="conn-notes"
               >Notes <span class="form-optional">optional</span></label
@@ -331,6 +378,52 @@
           <button class="btn btn-ghost" id="confirm-cancel">Cancel</button>
           <button class="btn btn-danger" id="confirm-ok">Delete</button>
         </div>
+      </div>
+    </div>
+
+    <!-- Quick Connect Modal -->
+    <div class="modal-overlay hidden" id="quick-connect-modal">
+      <div class="modal" style="max-width:420px">
+        <div class="modal-header">
+          <h2 class="modal-title">Quick Connect</h2>
+          <button class="modal-close" id="qc-cancel-top" aria-label="Close">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="1" y1="1" x2="11" y2="11"/><line x1="11" y1="1" x2="1" y2="11"/></svg>
+          </button>
+        </div>
+        <form id="qc-form" novalidate>
+          <div class="form-group">
+            <label class="form-label" for="qc-protocol">Protocol</label>
+            <select class="form-input" id="qc-protocol">
+              <option value="ssh">SSH (Direct)</option>
+              <option value="telnet">Telnet</option>
+              <option value="ssh-cf">SSH via Cloudflare Access</option>
+            </select>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="qc-host">Host <span class="form-required">*</span></label>
+              <input class="form-input" type="text" id="qc-host" placeholder="hostname or IP" autocomplete="off" />
+            </div>
+            <div class="form-group" style="max-width:100px">
+              <label class="form-label" for="qc-port">Port</label>
+              <input class="form-input" type="number" id="qc-port" value="22" min="1" max="65535" />
+            </div>
+          </div>
+          <div class="form-row">
+            <div class="form-group">
+              <label class="form-label" for="qc-user">Username</label>
+              <input class="form-input" type="text" id="qc-user" autocomplete="off" />
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="qc-pass">Password</label>
+              <input class="form-input" type="password" id="qc-pass" placeholder="••••••••" autocomplete="new-password" />
+            </div>
+          </div>
+          <div class="form-actions">
+            <button type="button" class="btn btn-ghost" id="qc-cancel">Cancel</button>
+            <button type="submit" class="btn btn-primary">Connect</button>
+          </div>
+        </form>
       </div>
     </div>
 

@@ -30,6 +30,30 @@
   --radius-sm: 6px;
   --font: "Segoe UI Variable", "Segoe UI", -apple-system, system-ui, sans-serif;
   --font-mono: "Cascadia Code", "Consolas", "Monaco", monospace;
+  --sidebar-w: 240px;
+}
+
+/* ─── Light theme ─────────────────────────────────────────────────────────── */
+[data-theme="light"] {
+  --bg: #f5f5f5;
+  --nav: #ececec;
+  --bg-elevated: #ffffff;
+  --bg-input: #f0f0f0;
+  --bg-hover: rgba(0, 0, 0, 0.05);
+  --bg-active: rgba(0, 0, 0, 0.08);
+  --border: rgba(0, 0, 0, 0.1);
+  --border-subtle: rgba(0, 0, 0, 0.06);
+  --text: rgba(0, 0, 0, 0.87);
+  --text-label: rgba(0, 0, 0, 0.5);
+  --text-muted: rgba(0, 0, 0, 0.38);
+  --text-dim: rgba(0, 0, 0, 0.2);
+  --connected: #2d9e22;
+  --connecting: #c67c00;
+  --disconnected: rgba(0, 0, 0, 0.22);
+  --error: #c62828;
+  --accent: rgba(0, 0, 0, 0.87);
+  --accent-dim: rgba(0, 0, 0, 0.06);
+  --accent-hover: #000000;
 }
 
 html,
@@ -75,13 +99,27 @@ body {
 
 /* ─── Sidebar / NavigationView ───────────────────────── */
 .sidebar {
-  width: 240px;
-  min-width: 240px;
+  width: var(--sidebar-w);
+  min-width: 180px;
+  max-width: 420px;
   background: var(--nav);
-  border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  flex-shrink: 0;
+}
+
+.sidebar-resize-handle {
+  width: 4px;
+  background: var(--border);
+  cursor: col-resize;
+  flex-shrink: 0;
+  transition: background 0.15s;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.dragging {
+  background: var(--accent-dim);
 }
 
 .sidebar-brand {
@@ -2020,4 +2058,377 @@ body.form-window-mode .modal-close {
 
 body.form-window-mode .modal-close {
   cursor: pointer;
+}
+
+/* ─── Uptime chip ─────────────────────────────────────────────────────────── */
+
+.uptime-chip {
+  font-size: 11px;
+  color: var(--connected);
+  background: rgba(108, 203, 95, 0.12);
+  border-radius: 10px;
+  padding: 2px 8px;
+  margin-left: 8px;
+  font-weight: 500;
+  flex-shrink: 0;
+}
+
+[data-theme="light"] .uptime-chip {
+  background: rgba(45, 158, 34, 0.1);
+}
+
+/* ─── xterm search bar ────────────────────────────────────────────────────── */
+
+.term-search-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--bg-elevated);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+.term-search-input {
+  flex: 1;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 3px 8px;
+  outline: none;
+  font-family: var(--font);
+  min-width: 0;
+}
+
+.term-search-input:focus {
+  border-color: var(--accent);
+}
+
+.term-search-count {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 60px;
+}
+
+.term-search-btn {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.term-search-btn:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* ─── Keyboard shortcuts overlay ─────────────────────────────────────────── */
+
+.shortcuts-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10001;
+}
+
+.shortcuts-box {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 24px 28px;
+  min-width: 360px;
+  max-width: 520px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.5);
+}
+
+.shortcuts-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: var(--text);
+}
+
+.shortcuts-section {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.7px;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  margin: 12px 0 6px;
+}
+
+.shortcut-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 3px 0;
+  font-size: 12.5px;
+  color: var(--text-label);
+}
+
+.shortcut-row kbd {
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--text);
+}
+
+/* ─── SFTP multi-select ───────────────────────────────────────────────────── */
+
+.sftp-row--multi-selected {
+  background: rgba(79, 158, 245, 0.12) !important;
+}
+
+.sftp-row--multi-selected:hover {
+  background: rgba(79, 158, 245, 0.18) !important;
+}
+
+.sftp-multi-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  background: rgba(79, 158, 245, 0.1);
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-label);
+  flex-shrink: 0;
+}
+
+/* ─── HTTP test result ────────────────────────────────────────────────────── */
+
+.http-test-result {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.http-test-result.ok {
+  color: var(--connected);
+}
+
+.http-test-result.err {
+  color: var(--error);
+}
+
+/* ─── Drag reorder ────────────────────────────────────────────────────────── */
+
+.tunnel-item[draggable="true"] {
+  cursor: grab;
+}
+
+.tunnel-item.drag-over {
+  border-top: 2px solid var(--accent);
+}
+
+/* ─── Password reveal wrapper ─────────────────────────────────────────────── */
+
+.form-input-reveal-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.form-input-reveal-wrap .form-input {
+  flex: 1;
+  padding-right: 34px;
+}
+
+.input-reveal-btn {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  transition: color 0.12s;
+}
+
+.input-reveal-btn:hover {
+  color: var(--text);
+}
+
+.input-reveal-btn.revealing {
+  color: var(--accent);
+}
+
+/* ─── Sidebar pin button ───────────────────────────────────────────────────── */
+
+.tunnel-item {
+  position: relative;
+}
+
+.pin-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--text-muted);
+  opacity: 0;
+  font-size: 13px;
+  line-height: 1;
+  transition: color 0.12s, opacity 0.12s;
+}
+
+.tunnel-item:hover .pin-btn,
+.tunnel-item.pinned .pin-btn {
+  opacity: 1;
+}
+
+.tunnel-item.pinned .pin-btn {
+  color: var(--accent);
+}
+
+/* ─── SFTP path edit input ────────────────────────────────────────────────── */
+
+.sftp-path-edit-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sftp-path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+  font-family: var(--font-mono);
+}
+
+.sftp-path-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 158, 245, 0.15);
+}
+
+/* ─── Terminal-only window root ───────────────────────────────────────────── */
+
+/* ─── Password reveal wrapper ─────────────────────────────────────────────── */
+
+.form-input-reveal-wrap {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.form-input-reveal-wrap .form-input {
+  flex: 1;
+  padding-right: 34px;
+}
+
+.input-reveal-btn {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+  transition: color 0.12s;
+}
+
+.input-reveal-btn:hover {
+  color: var(--text);
+}
+
+.input-reveal-btn.revealing {
+  color: var(--accent);
+}
+
+/* ─── Sidebar pin button ───────────────────────────────────────────────────── */
+
+.tunnel-item {
+  position: relative;
+}
+
+.pin-btn {
+  position: absolute;
+  right: 8px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  padding: 3px 4px;
+  border-radius: 3px;
+  cursor: pointer;
+  color: var(--text-muted);
+  opacity: 0;
+  font-size: 13px;
+  line-height: 1;
+  transition: color 0.12s, opacity 0.12s;
+}
+
+.tunnel-item:hover .pin-btn,
+.tunnel-item.pinned .pin-btn {
+  opacity: 1;
+}
+
+.tunnel-item.pinned .pin-btn {
+  color: var(--accent);
+}
+
+/* ─── SFTP path edit input ────────────────────────────────────────────────── */
+
+.sftp-path-edit-wrap {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sftp-path-input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-input);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  padding: 2px 6px;
+  outline: none;
+  font-family: var(--font-mono);
+}
+
+.sftp-path-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(79, 158, 245, 0.15);
 }
