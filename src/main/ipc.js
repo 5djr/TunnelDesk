@@ -272,7 +272,9 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("save-settings", async (event, partial) => {
-    return writeSettings(partial);
+    const result = await writeSettings(partial);
+    safeSend("settings-did-change", result);
+    return result;
   });
 
   ipcMain.handle("pick-file", async (event, opts = {}) => {
@@ -555,7 +557,11 @@ function registerIpcHandlers() {
         try {
           target = new NodeURL(targetUrl);
         } catch {
-          resolve({ statusCode: null, timeMs: Date.now() - start, error: "Invalid redirect URL" });
+          resolve({
+            statusCode: null,
+            timeMs: Date.now() - start,
+            error: "Invalid redirect URL",
+          });
           return;
         }
         const mod = target.protocol === "https:" ? require("https") : require("http");
@@ -571,7 +577,12 @@ function registerIpcHandlers() {
           (res) => {
             const status = res.statusCode;
             res.resume();
-            if (redirectsLeft > 0 && status >= 300 && status < 400 && res.headers.location) {
+            if (
+              redirectsLeft > 0 &&
+              status >= 300 &&
+              status < 400 &&
+              res.headers.location
+            ) {
               // Follow one redirect
               resolve(doRequest(res.headers.location, start, redirectsLeft - 1));
             } else {

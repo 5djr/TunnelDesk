@@ -9,6 +9,7 @@ const { readSettings } = require("./settings");
 const { initLogger, closeLogger } = require("./logger");
 const { createTray } = require("./tray");
 const { connectById, disconnectById } = require("./actions");
+const { checkForUpdate } = require("./updater");
 
 // ─── Chromium memory-reduction flags ─────────────────────────────────────────
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
@@ -91,6 +92,11 @@ app.whenReady().then(async () => {
     state.startMinimized = settings.startMinimized;
 
     createWindow();
+
+    // Check for updates in the background; never blocks startup.
+    checkForUpdate().then((update) => {
+      if (update) safeSend("update-available", update);
+    });
 
     if (settings.minimizeToTray) {
       createTray(

@@ -190,9 +190,7 @@ function createTermSession(connectionId, cfg, onData, onClose, onOsDetected) {
         // once detection finishes — no terminal output is dropped.
         resolve(sid);
         if (onOsDetected) {
-          osPromise
-            .then((osInfo) => onOsDetected(sid, osInfo))
-            .catch(() => {});
+          osPromise.then((osInfo) => onOsDetected(sid, osInfo)).catch(() => {});
         }
       });
     });

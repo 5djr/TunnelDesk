@@ -5,6 +5,18 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-05-29
+
+### Added
+
+- Update notification banner — on startup the app checks GitHub Releases for a newer version; if one is found, a dismissible blue banner appears at the top with a direct download link
+- Live OS icon in sidebar — the detected OS/distro icon now appears immediately after SSH connects without requiring an app restart; all open windows are kept in sync via a settings broadcast
+
+### Fixed
+
+- Console window flash suppressed for all spawned Windows processes — `mstsc.exe` spawns now include `windowsHide: true`, consistent with every other background process
+- Settings changes (e.g. OS cache updates) are broadcast to all windows so the main window's sidebar reflects them without a restart
+
 ## [0.1.4] - 2026-05-28
 
 ### Added

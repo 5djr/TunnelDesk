@@ -101,4 +101,12 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.removeAllListeners("connection-saved");
     ipcRenderer.on("connection-saved", () => callback());
   },
+  onSettingsDidChange: (callback) => {
+    ipcRenderer.removeAllListeners("settings-did-change");
+    ipcRenderer.on("settings-did-change", (_, data) => callback(data));
+  },
+  onUpdateAvailable: (callback) => {
+    ipcRenderer.removeAllListeners("update-available");
+    ipcRenderer.on("update-available", (_, data) => callback(data));
+  },
 });

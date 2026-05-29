@@ -92,7 +92,11 @@ async function writeSettings(partial) {
       Math.min(10, Math.floor(partial.autoReconnectAttempts)),
     );
   }
-  if (partial.osCache && typeof partial.osCache === "object" && !Array.isArray(partial.osCache)) {
+  if (
+    partial.osCache &&
+    typeof partial.osCache === "object" &&
+    !Array.isArray(partial.osCache)
+  ) {
     const cleaned = {};
     let count = 0;
     for (const [k, v] of Object.entries(partial.osCache)) {
@@ -105,7 +109,10 @@ async function writeSettings(partial) {
     safe.osCache = cleaned;
   }
   if (typeof partial.osCacheDurationHours === "number") {
-    safe.osCacheDurationHours = Math.max(1, Math.min(168, Math.floor(partial.osCacheDurationHours)));
+    safe.osCacheDurationHours = Math.max(
+      1,
+      Math.min(168, Math.floor(partial.osCacheDurationHours)),
+    );
   }
   const merged = { ...current, ...safe };
   const file = settingsPath();

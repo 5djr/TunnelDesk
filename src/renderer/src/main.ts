@@ -206,6 +206,8 @@ declare global {
       ): void;
       onAuthRequired(cb: (data: { id: string; url: string }) => void): void;
       onConnectionSaved(cb: () => void): void;
+      onSettingsDidChange(cb: (settings: Settings) => void): void;
+      onUpdateAvailable(cb: (data: { version: string; url: string }) => void): void;
     };
   }
 }
@@ -984,7 +986,8 @@ function showPrompt(message: string, defaultValue: string): Promise<string | nul
 // ─── Terminal management ──────────────────────────────────────────────────────
 
 function getOrInitTermState(connId: string): ConnTermState {
-  if (!termState.has(connId)) termState.set(connId, { tabs: [], activeTabId: null, osInfo: "unknown" });
+  if (!termState.has(connId))
+    termState.set(connId, { tabs: [], activeTabId: null, osInfo: "unknown" });
   return termState.get(connId)!;
 }
 
@@ -3241,6 +3244,35 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
   });
 }
 
+// Keep currentSettings in sync across all windows (e.g. osCache saved from terminal window).
+window.api.onSettingsDidChange((settings) => {
+  currentSettings = settings;
+  if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+    renderSidebar();
+  }
+});
+
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+  const updateBanner = document.getElementById("update-banner") as HTMLElement;
+  const updateBannerText = document.getElementById("update-banner-text") as HTMLElement;
+  const updateBannerLink = document.getElementById("update-banner-link") as HTMLAnchorElement;
+  const updateBannerDismiss = document.getElementById("update-banner-dismiss") as HTMLButtonElement;
+
+  window.api.onUpdateAvailable(({ version, url }) => {
+    updateBannerText.textContent = `TunnelDesk v${version} is available —`;
+    updateBannerLink.href = url;
+    updateBannerLink.addEventListener("click", (e) => {
+      e.preventDefault();
+      void window.api.openExternal(url);
+    });
+    updateBanner.classList.remove("hidden");
+  });
+
+  updateBannerDismiss.addEventListener("click", () => {
+    updateBanner.classList.add("hidden");
+  });
+}
+
 if (!IS_TERMINAL_WINDOW) {
   window.api.onStatusUpdate((data) => {
     const prev = statuses[data.id];
@@ -3339,7 +3371,10 @@ window.api.onSshOsDetected(async ({ sid, osInfo }) => {
   if (st) st.osInfo = osInfo;
   // Persist to cache and refresh sidebar icon
   const nowMs = Date.now();
-  const osCache = { ...(currentSettings?.osCache ?? {}), [loc.connId]: { osInfo, cachedAt: nowMs } };
+  const osCache = {
+    ...(currentSettings?.osCache ?? {}),
+    [loc.connId]: { osInfo, cachedAt: nowMs },
+  };
   try {
     currentSettings = await window.api.saveSettings({ osCache });
     renderSidebar();

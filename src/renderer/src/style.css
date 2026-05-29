@@ -1124,6 +1124,71 @@ body {
   color: var(--text-dim);
 }
 
+/* ─── Update Available Banner ─────────────────────────── */
+.update-banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 16px;
+  background: rgba(99, 179, 237, 0.1);
+  border-bottom: 1px solid rgba(99, 179, 237, 0.25);
+  color: #63b3ed;
+  font-size: 12px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+
+[data-theme="light"] .update-banner {
+  background: rgba(49, 130, 206, 0.08);
+  border-bottom-color: rgba(49, 130, 206, 0.2);
+  color: #2b6cb0;
+}
+
+.update-banner svg {
+  flex-shrink: 0;
+}
+
+.update-banner span {
+  flex: 1;
+}
+
+.update-banner-link {
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.update-banner-link:hover {
+  opacity: 0.8;
+}
+
+.update-banner-dismiss {
+  background: none;
+  border: none;
+  color: #63b3ed;
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.6;
+  flex-shrink: 0;
+}
+
+[data-theme="light"] .update-banner-dismiss {
+  color: #2b6cb0;
+}
+
+.update-banner-dismiss:hover {
+  opacity: 1;
+}
+
+.update-banner.hidden {
+  display: none;
+}
+
 /* ─── Dependency Warning Banner ───────────────────────── */
 .deps-warning {
   display: flex;
@@ -1579,7 +1644,9 @@ body {
   user-select: none;
   border-radius: 0;
   border: none;
-  transition: background 0.1s, color 0.1s;
+  transition:
+    background 0.1s,
+    color 0.1s;
 }
 
 [data-theme="light"] .term-tab {
@@ -1637,7 +1704,9 @@ body {
   opacity: 0;
   flex-shrink: 0;
   border-radius: 4px;
-  transition: opacity 0.1s, background 0.1s;
+  transition:
+    opacity 0.1s,
+    background 0.1s;
 }
 
 .term-tab:hover .term-tab-close,
@@ -1667,7 +1736,9 @@ body {
   justify-content: center;
   flex-shrink: 0;
   border-radius: 0;
-  transition: background 0.1s, color 0.1s;
+  transition:
+    background 0.1s,
+    color 0.1s;
 }
 
 [data-theme="light"] .term-new-btn {
