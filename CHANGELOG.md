@@ -5,6 +5,30 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-05-29
+
+### Fixed
+
+- RDP window not appearing after connect — `storeCredential` was rewritten in v0.2.3 to use PowerShell for security, but PowerShell's startup overhead (500ms–2s per invocation) delayed `mstsc` from launching, making it appear as if RDP was broken. Reverted to direct `cmdkey` calls (< 100ms each). This fixes both RDP-via-Cloudflare and direct RDP on Windows.
+
+## [0.2.3] - 2026-05-29
+
+### Added
+
+- **Microsoft Entra ID / Azure AD sign-in** — Settings → Account: enter your Azure App Registration Client ID + Tenant ID and sign in with Microsoft (MSAL v5, PKCE OAuth2, in-app browser, tokens stored DPAPI-encrypted)
+- **Organization config sync** — Settings → Organization: point to any HTTPS endpoint hosting a `tunneldesk-policy.json`; clients poll it on a configurable interval and display org-managed connections in the sidebar with a lock badge (read-only, still connectable)
+- **Group Policy enforcement** — Windows: `HKLM\SOFTWARE\Policies\TunnelDesk` registry keys; Linux: `/etc/tunneldesk/policy.json`. Keys: `ConfigSyncUrl`, `TenantId`, `ClientId`, `EnforceSSO`, `DisableManualConnections`, `SyncInterval`, `BannerMessage`, `AllowedProtocols`. Policy values override settings and lock the corresponding UI fields
+- **Policy banner** — when `BannerMessage` is set by policy, a persistent banner appears at the top of the main panel
+- **macOS support** — full RDP (`.rdp` file + Microsoft Remote Desktop from App Store), SSH (`ssh://` URL → Terminal.app, osascript fallback), and Telnet (`telnet://` URL) support; native macOS app menu (Cmd+C/V/Q/W/M); process memory tracking via `ps -p PID -o rss=`; Microsoft Remote Desktop detected in `/Applications/`
+- **macOS builds** — DMG + ZIP (x64 and arm64) via `npm run dist:mac`; GitHub Actions CI workflow (`.github/workflows/release.yml`) builds all three platforms on every `v*` tag push
+
+### Fixed
+
+- RDP window not appearing on connect — `storeCredential` was rewritten to use PowerShell for security, but PowerShell startup overhead (500ms–2s per invocation) delayed mstsc launch noticeably; reverted to direct `cmdkey` calls which complete in under 100ms
+- `sanitizePath` now rejects `../` sequences to prevent path traversal in SSH key paths
+- Org-managed connections from config sync now go through the same `sanitizeHostname`, `normalizePort`, `sanitizeUsername` validation as user-defined connections
+- Null-guard added to all `activeConnections.get()` re-checks after `await` calls in `rdp.js`
+
 ## [0.2.2] - 2026-05-29
 
 ### Added

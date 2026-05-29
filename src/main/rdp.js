@@ -217,56 +217,10 @@ function startRdpWatcher(connectionId, port) {
 }
 
 // ─── Windows credential management ───────────────────────────────────────────
-// Pass the password via an environment variable so it does not appear in the
-// process arguments visible to other users via Task Manager / WMI.
 
-function storeCredentialViaEnv(target, username, password) {
+function runCmdkey(args) {
   return new Promise((resolve) => {
-    // PowerShell reads $env:TUNNELDESK_CRED — the value never appears in cmdline.
-    const script =
-      `cmdkey /delete:"${target}" 2>$null; ` +
-      `cmdkey /add:"${target}" /user:"${username}" /pass:$env:TUNNELDESK_CRED`;
-    const proc = spawn(
-      "powershell",
-      ["-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
-      {
-        windowsHide: true,
-        stdio: "ignore",
-        env: { ...process.env, TUNNELDESK_CRED: password },
-      },
-    );
-    let settled = false;
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      resolve();
-    };
-    const timer = setTimeout(done, 6000);
-    proc.on("exit", done);
-    proc.on("error", () => {
-      // PowerShell unavailable — fall back to direct cmdkey (password visible in args).
-      const fallback = spawn(
-        "cmdkey",
-        [`/add:${target}`, `/user:${username}`, `/pass:${password}`],
-        { windowsHide: true, stdio: "ignore" },
-      );
-      const t2 = setTimeout(done, 5000);
-      fallback.on("exit", () => {
-        clearTimeout(t2);
-        done();
-      });
-      fallback.on("error", () => {
-        clearTimeout(t2);
-        done();
-      });
-    });
-  });
-}
-
-function runCmdkeyDelete(target) {
-  return new Promise((resolve) => {
-    const proc = spawn("cmdkey", [`/delete:${target}`], {
+    const proc = spawn("cmdkey", args, {
       windowsHide: true,
       stdio: "ignore",
     });
@@ -288,7 +242,8 @@ async function storeCredential(port, username, password) {
   const targets = [`TERMSRV/localhost:${port}`];
   if (port === 3389) targets.push("TERMSRV/localhost");
   for (const target of targets) {
-    await storeCredentialViaEnv(target, username, password);
+    await runCmdkey([`/delete:${target}`]);
+    await runCmdkey([`/add:${target}`, `/user:${username}`, `/pass:${password}`]);
   }
 }
 

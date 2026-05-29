@@ -1,7 +1,7 @@
 {
   "name": "tunneldesk",
   "productName": "TunnelDesk",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Cloudflare Zero Trust connection manager for Windows, Linux, and macOS",
   "main": "src/main/index.js",
   "scripts": {
@@ -133,11 +133,26 @@
   "keywords": [
     "electron",
     "cloudflare",
+    "cloudflare-zero-trust",
     "rdp",
     "ssh",
+    "telnet",
     "windows",
-    "linux"
+    "linux",
+    "macos",
+    "azure",
+    "entra-id",
+    "remote-desktop",
+    "vpn-alternative"
   ],
+  "homepage": "https://github.com/5djr/TunnelDesk",
+  "bugs": {
+    "url": "https://github.com/5djr/TunnelDesk/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/5djr/TunnelDesk.git"
+  },
   "author": {
     "name": "TunnelDesk",
     "email": "hello@tym.wtf"
