@@ -160,7 +160,8 @@ declare global {
       telnetWrite(sid: string, data: string): Promise<void>;
       telnetResize(sid: string, cols: number, rows: number): Promise<void>;
       telnetCloseSession(sid: string): Promise<void>;
-      sshTermCreate(connectionId: string): Promise<{ sid: string; osInfo: string }>;
+      sshTermCreate(connectionId: string): Promise<string>;
+      onSshOsDetected(cb: (d: { sid: string; osInfo: string }) => void): void;
       sshSftpCreate(connectionId: string): Promise<string>;
       sshWrite(sid: string, data: string): Promise<void>;
       sshResize(sid: string, cols: number, rows: number): Promise<void>;
@@ -1188,19 +1189,7 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
         const st = termState.get(connId);
         if (st) st.osInfo = "telnet";
       } else {
-        const result = await window.api.sshTermCreate(connId);
-        sid = result.sid;
-        const st = termState.get(connId);
-        if (st) st.osInfo = result.osInfo;
-        // Persist to cache so the sidebar icon updates
-        if (result.osInfo && result.osInfo !== "unknown") {
-          const nowMs = Date.now();
-          const osCache = { ...(currentSettings?.osCache ?? {}), [connId]: { osInfo: result.osInfo, cachedAt: nowMs } };
-          try {
-            currentSettings = await window.api.saveSettings({ osCache });
-            renderSidebar(); // refresh sidebar icon immediately
-          } catch {}
-        }
+        sid = await window.api.sshTermCreate(connId);
       }
 
       if (tab.cancelled) {
@@ -3342,6 +3331,20 @@ if (!IS_TERMINAL_WINDOW) {
     if (data.id === selectedId) renderDetail();
   });
 }
+
+window.api.onSshOsDetected(async ({ sid, osInfo }) => {
+  const loc = sidToTab.get(sid);
+  if (!loc || !osInfo || osInfo === "unknown") return;
+  const st = termState.get(loc.connId);
+  if (st) st.osInfo = osInfo;
+  // Persist to cache and refresh sidebar icon
+  const nowMs = Date.now();
+  const osCache = { ...(currentSettings?.osCache ?? {}), [loc.connId]: { osInfo, cachedAt: nowMs } };
+  try {
+    currentSettings = await window.api.saveSettings({ osCache });
+    renderSidebar();
+  } catch {}
+});
 
 window.api.onSshData(({ sid, data }) => {
   const loc = sidToTab.get(sid);

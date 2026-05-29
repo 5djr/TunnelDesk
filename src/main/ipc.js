@@ -365,12 +365,14 @@ function registerIpcHandlers() {
   // ─── SSH terminal ──────────────────────────────────────────────────────────
 
   ipcMain.handle("ssh-term-create", async (_event, connectionId) => {
-    return sshCreateTerm(
+    const sid = await sshCreateTerm(
       connectionId,
       (id, data) =>
         safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
       (id, code, signal) => safeSend("ssh-close", { sid: id, code, signal }),
+      (id, osInfo) => safeSend("ssh-os-detected", { sid: id, osInfo }),
     );
+    return sid;
   });
 
   ipcMain.handle("ssh-sftp-create", async (_event, connectionId) => {
@@ -468,6 +470,7 @@ function registerIpcHandlers() {
         conn.id && typeof conn.id === "string" && !existingIds.has(conn.id)
           ? conn.id
           : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      const jumpHost = sanitizeHostname(conn.jumpHost || "");
       existing.push({
         id,
         friendlyName: String(conn.friendlyName || hostname)
@@ -480,6 +483,8 @@ function registerIpcHandlers() {
         notes: sanitizeNotes(conn.notes),
         group: sanitizeGroup(conn.group),
         sshKeyPath: sanitizePath(conn.sshKeyPath),
+        jumpHost: jumpHost || undefined,
+        jumpPort: jumpHost ? normalizePort(conn.jumpPort || 22) : undefined,
       });
       existingIds.add(id);
       added++;
@@ -543,31 +548,48 @@ function registerIpcHandlers() {
     }
     if (parsed.protocol !== "http:" && parsed.protocol !== "https:")
       throw new Error("Only http and https are supported");
-    const mod = parsed.protocol === "https:" ? require("https") : require("http");
-    return new Promise((resolve) => {
-      const start = Date.now();
-      const req = mod.request(
-        {
-          hostname: parsed.hostname,
-          port: parsed.port || undefined,
-          path: parsed.pathname || "/",
-          method: "HEAD",
-          timeout: 8000,
-        },
-        (res) => {
-          res.resume();
-          resolve({ statusCode: res.statusCode, timeMs: Date.now() - start });
-        },
-      );
-      req.on("timeout", () => {
-        req.destroy();
-        resolve({ statusCode: null, timeMs: Date.now() - start, error: "Timeout" });
+
+    const doRequest = (targetUrl, start, redirectsLeft) =>
+      new Promise((resolve) => {
+        let target;
+        try {
+          target = new NodeURL(targetUrl);
+        } catch {
+          resolve({ statusCode: null, timeMs: Date.now() - start, error: "Invalid redirect URL" });
+          return;
+        }
+        const mod = target.protocol === "https:" ? require("https") : require("http");
+        const req = mod.request(
+          {
+            hostname: target.hostname,
+            port: target.port || undefined,
+            path: (target.pathname || "/") + (target.search || ""),
+            method: "HEAD",
+            timeout: 8000,
+            rejectUnauthorized: false, // allow self-signed certs for testing
+          },
+          (res) => {
+            const status = res.statusCode;
+            res.resume();
+            if (redirectsLeft > 0 && status >= 300 && status < 400 && res.headers.location) {
+              // Follow one redirect
+              resolve(doRequest(res.headers.location, start, redirectsLeft - 1));
+            } else {
+              resolve({ statusCode: status, timeMs: Date.now() - start });
+            }
+          },
+        );
+        req.on("timeout", () => {
+          req.destroy();
+          resolve({ statusCode: null, timeMs: Date.now() - start, error: "Timeout" });
+        });
+        req.on("error", (e) =>
+          resolve({ statusCode: null, timeMs: Date.now() - start, error: e.message }),
+        );
+        req.end();
       });
-      req.on("error", (e) =>
-        resolve({ statusCode: null, timeMs: Date.now() - start, error: e.message }),
-      );
-      req.end();
-    });
+
+    return doRequest(url, Date.now(), 1);
   });
 
   ipcMain.handle("delete-temp-connections", async () => {

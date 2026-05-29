@@ -94,9 +94,12 @@ async function writeSettings(partial) {
   }
   if (partial.osCache && typeof partial.osCache === "object" && !Array.isArray(partial.osCache)) {
     const cleaned = {};
+    let count = 0;
     for (const [k, v] of Object.entries(partial.osCache)) {
+      if (count >= 500) break; // prevent unbounded growth
       if (v && typeof v.osInfo === "string" && typeof v.cachedAt === "number") {
         cleaned[k] = { osInfo: v.osInfo, cachedAt: v.cachedAt };
+        count++;
       }
     }
     safe.osCache = cleaned;

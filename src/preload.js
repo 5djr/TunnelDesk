@@ -93,6 +93,10 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.removeAllListeners("ssh-close");
     ipcRenderer.on("ssh-close", (_, data) => callback(data));
   },
+  onSshOsDetected: (callback) => {
+    ipcRenderer.removeAllListeners("ssh-os-detected");
+    ipcRenderer.on("ssh-os-detected", (_, data) => callback(data));
+  },
   onConnectionSaved: (callback) => {
     ipcRenderer.removeAllListeners("connection-saved");
     ipcRenderer.on("connection-saved", () => callback());

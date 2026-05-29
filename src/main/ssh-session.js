@@ -103,15 +103,25 @@ function cancelPendingConnections(connectionId) {
 // with the PTY shell open so it adds no noticeable latency.
 function detectOsInfo(client) {
   return new Promise((resolve) => {
-    const done = setTimeout(() => resolve("unknown"), 2000);
+    let execStream = null;
+    const done = setTimeout(() => {
+      resolve("unknown");
+      if (execStream) {
+        try {
+          execStream.destroy();
+        } catch {}
+      }
+    }, 2000);
+    // sed correctly strips the literal ID= prefix and surrounding quotes
     const cmd =
-      'uname -s 2>/dev/null; cat /etc/os-release 2>/dev/null | grep -m1 "^ID=" | tr -d \'"ID= \'';
+      "uname -s 2>/dev/null; cat /etc/os-release 2>/dev/null | grep -m1 '^ID=' | sed 's/^ID=//;s/\"//g'";
     client.exec(cmd, (err, stream) => {
       if (err) {
         clearTimeout(done);
         resolve("unknown");
         return;
       }
+      execStream = stream;
       let out = "";
       stream.on("data", (d) => {
         if (out.length < 256) out += d.toString();
@@ -136,14 +146,14 @@ function detectOsInfo(client) {
   });
 }
 
-function createTermSession(connectionId, cfg, onData, onClose) {
+function createTermSession(connectionId, cfg, onData, onClose, onOsDetected) {
   return new Promise((resolve, reject) => {
     const client = new Client();
     const sid = genId();
 
     client.on("ready", () => {
       untrackPending(connectionId, client);
-      // Kick off OS detection concurrently so it doesn't block the shell open.
+      // Kick off OS detection now — resolves independently of the shell.
       const osPromise = detectOsInfo(client);
       client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
         if (err) {
@@ -175,10 +185,15 @@ function createTermSession(connectionId, cfg, onData, onClose) {
           onClose(sid, code, signal);
           client.end();
         });
-        // Resolve once both the shell and OS detection are settled.
-        osPromise
-          .then((osInfo) => resolve({ sid, osInfo }))
-          .catch(() => resolve({ sid, osInfo: "unknown" }));
+        // Resolve immediately so the renderer can set up sidToTab before any
+        // ssh-data events arrive. OS info is delivered via a separate callback
+        // once detection finishes — no terminal output is dropped.
+        resolve(sid);
+        if (onOsDetected) {
+          osPromise
+            .then((osInfo) => onOsDetected(sid, osInfo))
+            .catch(() => {});
+        }
       });
     });
 
@@ -189,11 +204,22 @@ function createTermSession(connectionId, cfg, onData, onClose) {
 
     client.on("error", (err) => {
       untrackPending(connectionId, client);
-      sessions.delete(sid);
-      try {
-        client.destroy();
-      } catch {}
-      reject(new Error(friendlySshError(err)));
+      if (sessions.has(sid)) {
+        // Session was already established — promise is settled; must notify the
+        // renderer explicitly since client.destroy() can bypass stream.close.
+        sessions.delete(sid);
+        try {
+          client.destroy();
+        } catch {}
+        onClose(sid, null, null);
+      } else {
+        // Still connecting — reject the promise and clean up.
+        sessions.delete(sid);
+        try {
+          client.destroy();
+        } catch {}
+        reject(new Error(friendlySshError(err)));
+      }
     });
 
     trackPending(connectionId, client);
@@ -247,7 +273,7 @@ function openJumpProxy(connection, password, keyPassphrase) {
   });
 }
 
-async function sshCreateTerm(connectionId, onData, onClose) {
+async function sshCreateTerm(connectionId, onData, onClose, onOsDetected) {
   const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
   let cfg = buildConnectConfig(connection, password, keyPassphrase);
   if (connection.jumpHost) {
@@ -257,14 +283,20 @@ async function sshCreateTerm(connectionId, onData, onClose) {
       keyPassphrase,
     );
     cfg = { ...cfg, sock };
-    return createTermSession(connectionId, cfg, onData, (sid, code, signal) => {
-      try {
-        jumpClient.end();
-      } catch {}
-      onClose(sid, code, signal);
-    });
+    return createTermSession(
+      connectionId,
+      cfg,
+      onData,
+      (sid, code, signal) => {
+        try {
+          jumpClient.end();
+        } catch {}
+        onClose(sid, code, signal);
+      },
+      onOsDetected,
+    );
   }
-  return createTermSession(connectionId, cfg, onData, onClose);
+  return createTermSession(connectionId, cfg, onData, onClose, onOsDetected);
 }
 
 // ─── SFTP session ─────────────────────────────────────────────────────────────
@@ -480,13 +512,20 @@ function sftpMkdir(sid, remotePath) {
 function closeSessionsForConnection(connectionId) {
   for (const [sid, s] of sessions.entries()) {
     if (s.connectionId !== connectionId) continue;
+    sessions.delete(sid);
     try {
       if (s.stream) s.stream.end();
     } catch {}
     try {
       s.client.end();
     } catch {}
-    sessions.delete(sid);
+    // Force-destroy after 5s in case client.end() hangs on an unresponsive server.
+    const client = s.client;
+    setTimeout(() => {
+      try {
+        client.destroy();
+      } catch {}
+    }, 5000);
   }
 }
 
