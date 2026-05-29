@@ -376,9 +376,10 @@ function registerIpcHandlers() {
         updateStatus(connId, "connected");
       }
     } else {
+      const wasConnected = connectionStatuses.get(connId) === "connected";
       activeConnections.delete(connId);
       updateStatus(connId, "disconnected");
-      sendConnectionLog(connId, "Connection failed.");
+      if (!wasConnected) sendConnectionLog(connId, "Connection failed.");
     }
   });
 

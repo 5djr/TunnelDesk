@@ -271,7 +271,6 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
     if (username && password) await storeCredential(port, username, password);
 
     const mstsc = spawn("mstsc", [`/v:localhost:${port}`], {
-      windowsHide: true,
       stdio: "ignore",
     });
     const active = activeConnections.get(connectionId);
@@ -366,7 +365,6 @@ async function launchRemoteDesktopDirect(connection, password) {
 
   if (IS_WIN) {
     rdpProc = spawn("mstsc", [`/v:${hostname}:${port}`], {
-      windowsHide: true,
       stdio: "ignore",
     });
   } else if (IS_MAC) {
