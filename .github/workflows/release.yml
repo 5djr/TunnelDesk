@@ -24,8 +24,8 @@ jobs:
         run: npm ci
 
       # cpu-features is an optionalDependency of ssh2 whose nan bindings are
-      # incompatible with Electron 42's V8. Deleting it before electron-builder
-      # runs prevents the native rebuild failure. ssh2 falls back to pure JS.
+      # incompatible with Electron 42 V8. Deleting it before electron-builder
+      # runs prevents the native rebuild failure; ssh2 falls back to pure JS.
       - name: Remove cpu-features (incompatible with Electron 42 V8)
         run: Remove-Item -Recurse -Force node_modules/cpu-features -ErrorAction SilentlyContinue
         shell: pwsh
@@ -34,7 +34,7 @@ jobs:
         run: npm run build:renderer
 
       - name: Package Windows
-        run: npx electron-builder --win --x64
+        run: npx electron-builder --win --x64 --publish=never
 
       - name: Upload Windows artifacts
         uses: softprops/action-gh-release@v2
@@ -62,7 +62,7 @@ jobs:
         run: npm ci
 
       - name: Remove cpu-features (incompatible with Electron 42 V8)
-        run: rm -rf node_modules/cpu-features || true
+        run: rm -rf node_modules/cpu-features
 
       - name: Install Linux build tools
         run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg
@@ -71,7 +71,7 @@ jobs:
         run: npm run build:renderer
 
       - name: Package Linux
-        run: npx electron-builder --linux --x64
+        run: npx electron-builder --linux --x64 --publish=never
 
       - name: Upload Linux artifacts
         uses: softprops/action-gh-release@v2
@@ -99,13 +99,13 @@ jobs:
         run: npm ci
 
       - name: Remove cpu-features (incompatible with Electron 42 V8)
-        run: rm -rf node_modules/cpu-features || true
+        run: rm -rf node_modules/cpu-features
 
       - name: Build renderer
         run: npm run build:renderer
 
       - name: Package macOS
-        run: npx electron-builder --mac
+        run: npx electron-builder --mac --publish=never
 
       - name: Upload macOS artifacts
         uses: softprops/action-gh-release@v2
