@@ -851,7 +851,8 @@ function protocolLabel(p: string): string {
 }
 
 // Inline brand logos used inside the Protocol detail row.
-const _LOGO_MS = `<svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:3px;flex-shrink:0;display:inline-block"><rect x="1" y="1" width="10" height="10" fill="#F25022"/><rect x="13" y="1" width="10" height="10" fill="#7FBA00"/><rect x="1" y="13" width="10" height="10" fill="#00A4EF"/><rect x="13" y="13" width="10" height="10" fill="#FFB900"/></svg>`;
+const _LOGO_MS = `<svg width="12" height="12" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:3px;flex-shrink:0;display:inline-block"><path d="M0 0h11.377v11.377H0z" fill="#F25022"/><path d="M12.623 0H24v11.377H12.623z" fill="#7FBA00"/><path d="M0 12.623h11.377V24H0z" fill="#00A4EF"/><path d="M12.623 12.623H24V24H12.623z" fill="#FFB900"/></svg>`;
+const _LOGO_MS_SM = `<svg width="11" height="11" viewBox="0 0 24 24" style="vertical-align:-1px;margin-right:5px;flex-shrink:0;display:inline-block"><path d="M0 0h11.377v11.377H0z" fill="#F25022"/><path d="M12.623 0H24v11.377H12.623z" fill="#7FBA00"/><path d="M0 12.623h11.377V24H0z" fill="#00A4EF"/><path d="M12.623 12.623H24V24H12.623z" fill="#FFB900"/></svg>`;
 const _LOGO_CF = `<svg width="16" height="13" viewBox="0 0 24 24" style="vertical-align:-2px;margin-right:3px;flex-shrink:0;display:inline-block" fill="#F6821F"><path d="M16.5088 16.8447c.1475-.5068.0908-.9707-.1553-1.3154-.2246-.3164-.6045-.499-1.0615-.5205l-8.6592-.1123a.1559.1559 0 0 1-.1333-.0713c-.0283-.042-.0351-.0986-.021-.1553.0278-.084.1123-.1484.2036-.1562l8.7359-.1123c1.0351-.0489 2.1601-.8868 2.5537-1.9136l.499-1.3013c.0215-.0561.0293-.1128.0147-.168-.5625-2.5463-2.835-4.4453-5.5499-4.4453-2.5039 0-4.6284 1.6177-5.3876 3.8614-.4927-.3658-1.1187-.5625-1.794-.499-1.2026.119-2.1665 1.083-2.2861 2.2856-.0283.31-.0069.6128.0635.894C1.5683 13.171 0 14.7754 0 16.752c0 .1748.0142.3515.0352.5273.0141.083.0844.1475.1689.1475h15.9814c.0909 0 .1758-.0645.2032-.1553l.12-.4268zm2.7568-5.5634c-.0771 0-.1611 0-.2383.0112-.0566 0-.1054.0415-.127.0976l-.3378 1.1744c-.1475.5068-.0918.9707.1543 1.3164.2256.3164.6055.498 1.0625.5195l1.8437.1133c.0557 0 .1055.0263.1329.0703.0283.043.0351.1074.0214.1562-.0283.084-.1132.1485-.204.1553l-1.921.1123c-1.041.0488-2.1582.8867-2.5527 1.914l-.1406.3585c-.0283.0713.0215.1416.0986.1416h6.5977c.0771 0 .1474-.0489.169-.126.1122-.4082.1757-.837.1757-1.2803 0-2.6025-2.125-4.727-4.7344-4.727"/></svg>`;
 
 function protocolLabelHtml(p: string): string {
@@ -2244,9 +2245,9 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
 function getOsIcon(os: string, size = 14): string {
   const s = (os || "").toLowerCase().replace(/-/g, "");
   const d = `width="${size}" height="${size}" viewBox="0 0 24 24"`;
-  // Windows — official Microsoft flag (F25022/7FBA00/00A4EF/FFB900)
+  // Windows — official Microsoft 4-square logo (exact brand proportions 11.377/12.623)
   if (s === "windows" || s === "windowsnt")
-    return `<svg ${d}><rect x="1" y="1" width="10" height="10" fill="#F25022"/><rect x="13" y="1" width="10" height="10" fill="#7FBA00"/><rect x="1" y="13" width="10" height="10" fill="#00A4EF"/><rect x="13" y="13" width="10" height="10" fill="#FFB900"/></svg>`;
+    return `<svg ${d}><path d="M0 0h11.377v11.377H0z" fill="#F25022"/><path d="M12.623 0H24v11.377H12.623z" fill="#7FBA00"/><path d="M0 12.623h11.377V24H0z" fill="#00A4EF"/><path d="M12.623 12.623H24V24H12.623z" fill="#FFB900"/></svg>`;
   // Ubuntu — SimpleIcons official path (E95420)
   if (s.startsWith("ubuntu"))
     return `<svg ${d} fill="#E95420"><path d="M17.61.455a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zM12.92.8C8.923.777 5.137 2.941 3.148 6.451a4.5 4.5 0 0 1 .26-.007 4.92 4.92 0 0 1 2.585.737A8.316 8.316 0 0 1 12.688 3.6 4.944 4.944 0 0 1 13.723.834 11.008 11.008 0 0 0 12.92.8zm9.226 4.994a4.915 4.915 0 0 1-1.918 2.246 8.36 8.36 0 0 1-.273 8.303 4.89 4.89 0 0 1 1.632 2.54 11.156 11.156 0 0 0 .559-13.089zM3.41 7.932A3.41 3.41 0 0 0 0 11.342a3.41 3.41 0 0 0 3.41 3.409 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41zm2.027 7.866a4.908 4.908 0 0 1-2.915.358 11.1 11.1 0 0 0 7.991 6.698 11.234 11.234 0 0 0 2.422.249 4.879 4.879 0 0 1-.999-2.85 8.484 8.484 0 0 1-.836-.136 8.304 8.304 0 0 1-5.663-4.32zm11.405.928a3.41 3.41 0 0 0-3.41 3.41 3.41 3.41 0 0 0 3.41 3.41 3.41 3.41 0 0 0 3.41-3.41 3.41 3.41 0 0 0-3.41-3.41z"/></svg>`;
@@ -3168,7 +3169,7 @@ function renderSettingsPanel() {
         </div>
         <div class="settings-row">
           <div class="settings-row-label">
-            <span class="settings-label">Microsoft account</span>
+            <span class="settings-label">${_LOGO_MS_SM}Microsoft account</span>
             <span class="settings-desc">Sign in to enable organization features. Requires Client ID above.</span>
           </div>
           ${
@@ -3181,7 +3182,7 @@ function renderSettingsPanel() {
                 </div>
                 <button class="btn btn-ghost btn-sm" id="s-sign-out">Sign out</button>
               </div>`
-              : `<button class="btn btn-secondary btn-sm" id="s-sign-in" ${!effectiveClientId ? "disabled" : ""}>Sign in with Microsoft</button>`
+              : `<button class="btn btn-secondary btn-sm" id="s-sign-in" ${!effectiveClientId ? "disabled" : ""}>${_LOGO_MS_SM}Sign in with Microsoft</button>`
           }
         </div>
       </div>
