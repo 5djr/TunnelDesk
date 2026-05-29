@@ -23,6 +23,36 @@ interface Connection {
   jumpHost: string;
   jumpPort: number | null;
   temp: boolean;
+  managed?: boolean;
+}
+
+interface PolicyState {
+  configSyncUrl?: string;
+  tenantId?: string;
+  clientId?: string;
+  enforceSSO?: boolean;
+  syncInterval?: number;
+  disableManualConnections?: boolean;
+  bannerMessage?: string;
+  allowedProtocols?: string[];
+}
+
+interface AuthUser {
+  name: string;
+  email: string;
+  tenantId: string;
+  homeAccountId: string;
+}
+
+interface AuthStatus {
+  signedIn: boolean;
+  user: AuthUser | null;
+}
+
+interface SyncStatus {
+  lastSyncTime: number | null;
+  lastSyncError: string | null;
+  count: number;
 }
 
 type ConnectionStatus = "connected" | "connecting" | "disconnected";
@@ -67,6 +97,10 @@ interface Settings {
   autoReconnectAttempts: number;
   osCache: Record<string, { osInfo: string; cachedAt: number }>;
   osCacheDurationHours: number;
+  entraClientId: string;
+  entraTenantId: string;
+  configSyncUrl: string;
+  configSyncInterval: number;
 }
 
 type TermTabType = "term" | "sftp";
@@ -134,6 +168,9 @@ declare global {
         notes?: string;
         group?: string;
         sshKeyPath?: string;
+        jumpHost?: string;
+        jumpPort?: number | null;
+        temp?: boolean;
       }): Promise<Connection>;
       deleteConnection(id: string): Promise<Connection[]>;
       connect(id: string): Promise<{ status: string }>;
@@ -151,6 +188,9 @@ declare global {
       openExternal(url: string): Promise<void>;
       openTermWindow(connId: string, label: string): Promise<void>;
       openFormWindow(connId?: string | null): Promise<void>;
+      openQcWindow(): Promise<void>;
+      openConfirmWindow(message: string): Promise<boolean>;
+      confirmResult(result: boolean): Promise<void>;
       sshReportStatus(connId: string, ok: boolean): Promise<void>;
       onStatusUpdate(cb: (data: { id: string; status: ConnectionStatus }) => void): void;
       onLog(cb: (data: { id?: string; message: string }) => void): void;
@@ -208,6 +248,17 @@ declare global {
       onConnectionSaved(cb: () => void): void;
       onSettingsDidChange(cb: (settings: Settings) => void): void;
       onUpdateAvailable(cb: (data: { version: string; url: string }) => void): void;
+      authSignIn(clientId: string, tenantId: string): Promise<AuthUser>;
+      authSignOut(): Promise<void>;
+      authGetStatus(): Promise<AuthStatus>;
+      syncFetchNow(): Promise<{ count: number }>;
+      getManagedConnections(): Promise<Connection[]>;
+      getSyncStatus(): Promise<SyncStatus>;
+      getPolicy(): Promise<PolicyState>;
+      onManagedConnectionsUpdated(
+        cb: (data: { connections: Connection[]; policies: PolicyState }) => void,
+      ): void;
+      onPolicyUpdated(cb: (policy: PolicyState) => void): void;
     };
   }
 }
@@ -215,6 +266,9 @@ declare global {
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let connections: Connection[] = [];
+let managedConnections: Connection[] = [];
+let currentPolicy: PolicyState = {};
+let currentAuthStatus: AuthStatus = { signedIn: false, user: null };
 const statuses: Record<string, ConnectionStatus> = {};
 const rdpClosed = new Set<string>();
 const authPendingUrls = new Map<string, string>(); // connectionId -> auth URL
@@ -247,6 +301,9 @@ const IS_TERMINAL_WINDOW = _twParams.get("mode") === "terminal";
 const TERM_WIN_CONN_ID = IS_TERMINAL_WINDOW ? (_twParams.get("connId") ?? null) : null;
 const IS_FORM_WINDOW = _twParams.get("mode") === "form";
 const FORM_WIN_CONN_ID = IS_FORM_WINDOW ? (_twParams.get("connId") ?? null) : null;
+const IS_QC_WINDOW = _twParams.get("mode") === "qc";
+const IS_CONFIRM_WINDOW = _twParams.get("mode") === "confirm";
+const CONFIRM_MESSAGE = _twParams.get("message") ?? "";
 
 // ─── Terminal state ───────────────────────────────────────────────────────────
 // Keyed by connectionId; values survive re-renders so xterm instances aren't recreated.
@@ -284,6 +341,257 @@ const xtermTheme = {
   brightCyan: "#7ad9f1",
   brightWhite: "#ffffff",
 };
+
+// ─── Custom Select ────────────────────────────────────────────────────────────
+
+class CustomSelect {
+  private native: HTMLSelectElement;
+  private wrapper: HTMLDivElement;
+  private trigger: HTMLButtonElement;
+  private labelEl: HTMLSpanElement;
+  private dropdown: HTMLDivElement;
+  private isOpen = false;
+  private focusedIdx = -1;
+  private optionBtns: HTMLButtonElement[] = [];
+
+  constructor(native: HTMLSelectElement) {
+    this.native = native;
+
+    this.wrapper = document.createElement("div");
+    this.wrapper.className = "custom-select";
+    if (native.classList.contains("settings-select")) {
+      this.wrapper.classList.add("settings-select");
+    }
+
+    this.trigger = document.createElement("button");
+    this.trigger.type = "button";
+    this.trigger.className = "custom-select-trigger";
+
+    this.labelEl = document.createElement("span");
+    this.labelEl.className = "custom-select-label";
+
+    const chevron = document.createElement("span");
+    chevron.className = "custom-select-chevron";
+    chevron.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="2,3.5 5,6.5 8,3.5"/></svg>`;
+
+    this.trigger.append(this.labelEl, chevron);
+
+    this.dropdown = document.createElement("div");
+    this.dropdown.className = "custom-select-dropdown";
+    this.dropdown.hidden = true;
+
+    this.wrapper.append(this.trigger, this.dropdown);
+    native.parentNode!.insertBefore(this.wrapper, native);
+    native.style.display = "none";
+
+    this.buildOptions();
+    this.syncLabel();
+
+    this.trigger.addEventListener("click", () => this.toggle());
+    this.trigger.addEventListener("keydown", (e) => {
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        if (!this.isOpen) this.open();
+        this.moveFocus(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!this.isOpen) this.open();
+        this.moveFocus(-1);
+      } else if (e.key === "Escape") {
+        this.close();
+      }
+    });
+
+    document.addEventListener("click", (e) => {
+      if (this.isOpen && !this.wrapper.contains(e.target as Node)) this.close();
+    });
+  }
+
+  private buildOptions() {
+    this.dropdown.innerHTML = "";
+    this.optionBtns = [];
+    let idx = 0;
+    for (const child of Array.from(this.native.children)) {
+      if (child.tagName === "OPTGROUP") {
+        const grp = child as HTMLOptGroupElement;
+        const groupEl = document.createElement("div");
+        groupEl.className = "custom-select-group";
+        groupEl.textContent = grp.label;
+        this.dropdown.appendChild(groupEl);
+        for (const opt of Array.from(grp.children) as HTMLOptionElement[]) {
+          this.dropdown.appendChild(this.makeOption(opt, idx++));
+        }
+      } else if (child.tagName === "OPTION") {
+        this.dropdown.appendChild(this.makeOption(child as HTMLOptionElement, idx++));
+      }
+    }
+  }
+
+  private makeOption(opt: HTMLOptionElement, idx: number): HTMLButtonElement {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "custom-select-option";
+    if (opt.selected) btn.classList.add("selected");
+    btn.dataset.value = opt.value;
+    btn.textContent = opt.text;
+    btn.addEventListener("click", () => this.pick(opt.value));
+    btn.addEventListener("mouseenter", () => {
+      this.focusedIdx = idx;
+      this.highlightFocused();
+    });
+    btn.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        this.pick(opt.value);
+      } else if (e.key === "ArrowDown") {
+        e.preventDefault();
+        this.moveFocus(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        this.moveFocus(-1);
+      } else if (e.key === "Escape" || e.key === "Tab") {
+        this.close();
+        this.trigger.focus();
+      }
+    });
+    this.optionBtns.push(btn);
+    return btn;
+  }
+
+  private pick(value: string) {
+    this.native.value = value;
+    this.native.dispatchEvent(new Event("change", { bubbles: true }));
+    this.syncLabel();
+    this.syncSelected();
+    this.close();
+    this.trigger.focus();
+  }
+
+  private open() {
+    if (this.isOpen) return;
+    this.isOpen = true;
+    this.trigger.classList.add("open");
+    this.dropdown.hidden = false;
+    this.position();
+    const sel = this.optionBtns.findIndex((b) => b.dataset.value === this.native.value);
+    this.focusedIdx = sel >= 0 ? sel : 0;
+    this.highlightFocused();
+    this.optionBtns[this.focusedIdx]?.focus();
+  }
+
+  private close() {
+    if (!this.isOpen) return;
+    this.isOpen = false;
+    this.trigger.classList.remove("open");
+    this.dropdown.hidden = true;
+  }
+
+  private toggle() {
+    this.isOpen ? this.close() : this.open();
+  }
+
+  private position() {
+    const r = this.trigger.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - r.bottom;
+    const spaceAbove = r.top;
+    const maxH = 280;
+    this.dropdown.style.width = `${r.width}px`;
+    this.dropdown.style.left = `${r.left}px`;
+    this.dropdown.style.maxHeight = `${Math.min(maxH, Math.max(spaceBelow, spaceAbove) - 8)}px`;
+    if (spaceBelow >= spaceAbove || spaceBelow >= 120) {
+      this.dropdown.style.top = `${r.bottom + 4}px`;
+      this.dropdown.style.bottom = "";
+    } else {
+      this.dropdown.style.bottom = `${window.innerHeight - r.top + 4}px`;
+      this.dropdown.style.top = "";
+    }
+  }
+
+  private moveFocus(dir: 1 | -1) {
+    if (!this.optionBtns.length) return;
+    this.focusedIdx = Math.max(
+      0,
+      Math.min(this.optionBtns.length - 1, this.focusedIdx + dir),
+    );
+    this.highlightFocused();
+    this.optionBtns[this.focusedIdx]?.focus();
+  }
+
+  private highlightFocused() {
+    this.optionBtns.forEach((b, i) =>
+      b.classList.toggle("focused", i === this.focusedIdx),
+    );
+  }
+
+  private syncLabel() {
+    const opt = this.native.options[this.native.selectedIndex];
+    this.labelEl.textContent = opt ? opt.text : "";
+  }
+
+  private syncSelected() {
+    this.optionBtns.forEach((b) =>
+      b.classList.toggle("selected", b.dataset.value === this.native.value),
+    );
+  }
+
+  refresh() {
+    this.syncLabel();
+    this.syncSelected();
+  }
+}
+
+const _customSelectMap = new WeakMap<HTMLSelectElement, CustomSelect>();
+
+function initCustomSelects(root: ParentNode = document) {
+  root.querySelectorAll<HTMLSelectElement>("select.form-input").forEach((el) => {
+    if (!_customSelectMap.has(el)) _customSelectMap.set(el, new CustomSelect(el));
+  });
+}
+
+function refreshCustomSelect(el: HTMLSelectElement) {
+  _customSelectMap.get(el)?.refresh();
+}
+
+// ─── Tooltip ─────────────────────────────────────────────────────────────────
+
+(function initTooltip() {
+  let tip: HTMLDivElement | null = null;
+  let hideTimer = 0;
+
+  const show = (text: string, target: HTMLElement) => {
+    clearTimeout(hideTimer);
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "td-tooltip";
+      document.body.appendChild(tip);
+    }
+    tip.textContent = text;
+    const r = target.getBoundingClientRect();
+    const tx = Math.min(r.left + r.width / 2, window.innerWidth - tip.offsetWidth - 8);
+    const ty = r.bottom + 6;
+    tip.style.left = `${Math.max(4, tx)}px`;
+    tip.style.top = `${ty + tip.offsetHeight > window.innerHeight ? r.top - tip.offsetHeight - 6 : ty}px`;
+  };
+
+  const hide = () => {
+    hideTimer = window.setTimeout(() => {
+      tip?.remove();
+      tip = null;
+    }, 80);
+  };
+
+  document.addEventListener("mouseover", (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>("[data-tooltip]");
+    if (el) show(el.dataset.tooltip!, el);
+  });
+  document.addEventListener("mouseout", (e) => {
+    if ((e.target as HTMLElement).closest("[data-tooltip]")) hide();
+  });
+  document.addEventListener("mousedown", () => {
+    tip?.remove();
+    tip = null;
+  });
+})();
 
 // ─── DOM Refs ─────────────────────────────────────────────────────────────────
 
@@ -647,9 +955,7 @@ function connName(id: string): string {
 }
 
 function isModalOpen(): boolean {
-  return (
-    !formModal.classList.contains("hidden") || !confirmModal.classList.contains("hidden")
-  );
+  return !formModal.classList.contains("hidden");
 }
 
 function isEditing(): boolean {
@@ -867,7 +1173,8 @@ async function updateDebugStats(connId: string) {
 
 type MenuEntry =
   | { separator: true }
-  | { label: string; disabled?: boolean; action: () => void };
+  | { title: string }
+  | { label: string; disabled?: boolean; danger?: boolean; action: () => void };
 
 function showDropdownMenu(x: number, y: number, items: MenuEntry[]): void {
   const old = document.getElementById("_td-dropdown");
@@ -875,8 +1182,7 @@ function showDropdownMenu(x: number, y: number, items: MenuEntry[]): void {
 
   const menu = document.createElement("div");
   menu.id = "_td-dropdown";
-  menu.style.cssText =
-    "position:fixed;background:var(--bg-elevated);border:1px solid var(--border);border-radius:var(--radius-sm);z-index:9999;min-width:160px;padding:4px 0;font-size:13px;box-shadow:0 4px 16px rgba(0,0,0,0.4)";
+  menu.className = "td-dropdown";
   menu.style.left = `${x}px`;
   menu.style.top = `${y}px`;
 
@@ -891,20 +1197,27 @@ function showDropdownMenu(x: number, y: number, items: MenuEntry[]): void {
   for (const entry of items) {
     if ("separator" in entry) {
       const sep = document.createElement("div");
-      sep.style.cssText = "height:1px;background:var(--border);margin:4px 0;";
+      sep.className = "td-dropdown-sep";
       menu.appendChild(sep);
       continue;
     }
+    if ("title" in entry) {
+      const wrap = document.createElement("div");
+      wrap.className = "td-dropdown-title";
+      const chip = document.createElement("span");
+      chip.className = "td-dropdown-title-chip";
+      chip.innerHTML = `<svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>${escapeHtml(entry.title)}`;
+      wrap.appendChild(chip);
+      menu.appendChild(wrap);
+      continue;
+    }
     const el = document.createElement("div");
-    el.style.cssText = `padding:7px 14px;cursor:${entry.disabled ? "default" : "pointer"};opacity:${entry.disabled ? "0.4" : "1"};`;
+    el.className =
+      "td-dropdown-item" +
+      (entry.disabled ? " disabled" : "") +
+      (entry.danger ? " danger" : "");
     el.textContent = entry.label;
     if (!entry.disabled) {
-      el.addEventListener("mouseenter", () => {
-        el.style.background = "var(--bg-hover)";
-      });
-      el.addEventListener("mouseleave", () => {
-        el.style.background = "";
-      });
       el.addEventListener("click", () => {
         dismiss();
         entry.action();
@@ -2058,7 +2371,7 @@ function renderTerminalDetail(conn: Connection): void {
     disconnectBtn.addEventListener("click", () => handleAction("disconnect", conn.id));
     barActions.appendChild(disconnectBtn);
   }
-  tabBar.appendChild(barActions);
+  if (barActions.hasChildNodes()) tabBar.appendChild(barActions);
 
   view.appendChild(tabBar);
 
@@ -2167,8 +2480,11 @@ function makeSidebarItem(conn: Connection, pinnedIds: Set<string>): HTMLElement 
       ? getOsIcon(cachedOs, 16)
       : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`;
   const item = document.createElement("div");
-  item.className = `tunnel-item ${status}${selectedId === conn.id && !settingsView ? " active" : ""}${isPinned ? " pinned" : ""}`;
+  const isManaged = !!conn.managed;
+  item.className = `tunnel-item ${status}${selectedId === conn.id && !settingsView ? " active" : ""}${isPinned && !isManaged ? " pinned" : ""}${isManaged ? " managed" : ""}`;
   item.dataset.id = conn.id;
+  const groupSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>`;
+  const managedBadgeSvg = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.6" data-tooltip="Managed by your organization"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`;
   item.innerHTML = `
     <div class="tunnel-icon">
       ${connIcon}
@@ -2178,10 +2494,15 @@ function makeSidebarItem(conn: Connection, pinnedIds: Set<string>): HTMLElement 
       <div class="tunnel-item-name">${escapeHtml(conn.friendlyName || conn.hostname)}</div>
       <div class="tunnel-item-host">${escapeHtml(conn.hostname)}</div>
     </div>
-    <button class="pin-btn" title="${isPinned ? "Unpin" : "Pin"}">${isPinned ? "★" : "☆"}</button>
+    ${
+      isManaged
+        ? `<span class="managed-badge" data-tooltip="Managed by your organization">${managedBadgeSvg}</span>`
+        : `<button class="group-btn${conn.group ? " has-group" : ""}" data-tooltip="${conn.group ? "Group: " + escapeHtml(conn.group) : "Set group"}">${groupSvg}</button>
+         <button class="pin-btn" data-tooltip="${isPinned ? "Unpin" : "Pin"}">${isPinned ? "★" : "☆"}</button>`
+    }
   `;
   item.addEventListener("click", (e) => {
-    if ((e.target as HTMLElement).classList.contains("pin-btn")) return;
+    if ((e.target as HTMLElement).closest(".pin-btn, .group-btn")) return;
     if (selectedId !== conn.id || settingsView) {
       debugMode = false;
       stopDebugPoll();
@@ -2191,33 +2512,59 @@ function makeSidebarItem(conn: Connection, pinnedIds: Set<string>): HTMLElement 
     renderSidebar();
     renderDetail();
   });
-  const pinBtn = item.querySelector<HTMLButtonElement>(".pin-btn")!;
-  pinBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    void togglePin(conn.id);
-  });
-  makeSidebarItemDraggable(item, conn.id);
 
-  item.addEventListener("contextmenu", (e) => {
-    e.preventDefault();
-    showDropdownMenu(e.clientX, e.clientY, [
-      {
-        label: isPinned ? "Unpin" : "Pin to top",
-        action: () => void togglePin(conn.id),
-      },
-      { separator: true },
-      { label: "Edit", action: () => window.api.openFormWindow(conn.id) },
-      {
-        label: "Duplicate",
-        action: () => void handleAction("duplicate", conn.id),
-      },
-      { separator: true },
-      {
-        label: "Delete",
-        action: () => void handleAction("delete", conn.id),
-      },
-    ]);
-  });
+  if (!isManaged) {
+    const pinBtn = item.querySelector<HTMLButtonElement>(".pin-btn")!;
+    pinBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      void togglePin(conn.id);
+    });
+
+    const groupBtn = item.querySelector<HTMLButtonElement>(".group-btn")!;
+    groupBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      showGroupPicker(groupBtn, conn);
+    });
+
+    makeSidebarItemDraggable(item, conn.id);
+
+    item.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showDropdownMenu(e.clientX, e.clientY, [
+        {
+          label: isPinned ? "Unpin" : "Pin to top",
+          action: () => void togglePin(conn.id),
+        },
+        ...(conn.group ? [{ title: conn.group } as MenuEntry] : []),
+        {
+          label: conn.group ? "Change group…" : "Set group…",
+          action: () => showGroupPicker(groupBtn!, conn),
+        },
+        { separator: true },
+        { label: "Edit", action: () => window.api.openFormWindow(conn.id) },
+        {
+          label: "Duplicate",
+          action: () => void handleAction("duplicate", conn.id),
+        },
+        { separator: true },
+        {
+          label: "Delete",
+          danger: true,
+          action: () => void handleAction("delete", conn.id),
+        },
+      ]);
+    });
+  } else {
+    item.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showDropdownMenu(e.clientX, e.clientY, [
+        { title: "Managed by organization" } as MenuEntry,
+        { separator: true },
+        { label: "Connect", action: () => void handleAction("connect", conn.id) },
+      ]);
+    });
+  }
+
   return item;
 }
 
@@ -2232,6 +2579,134 @@ async function togglePin(connId: string): Promise<void> {
     renderSidebar();
   } catch {
     showToast("Could not update pin.", "error");
+  }
+}
+
+function showGroupPicker(anchor: HTMLElement, conn: Connection): void {
+  const existing = document.getElementById("_td-group-picker");
+  if (existing) {
+    existing.remove();
+    return;
+  }
+
+  const otherGroups = [
+    ...new Set(
+      connections.filter((c) => c.group && c.id !== conn.id).map((c) => c.group),
+    ),
+  ].sort();
+
+  const picker = document.createElement("div");
+  picker.id = "_td-group-picker";
+  picker.className = "group-picker";
+
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "group-picker-input";
+  input.value = conn.group || "";
+  input.placeholder = "Group name…";
+  picker.appendChild(input);
+
+  if (otherGroups.length) {
+    const list = document.createElement("div");
+    list.className = "group-picker-list";
+    for (const g of otherGroups) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "group-picker-item" + (conn.group === g ? " active" : "");
+      btn.textContent = g;
+      btn.addEventListener("mousedown", (e) => {
+        e.preventDefault();
+        dismiss();
+        void assignGroup(conn, g);
+      });
+      list.appendChild(btn);
+    }
+    picker.appendChild(list);
+  }
+
+  if (conn.group) {
+    const sep = document.createElement("div");
+    sep.className = "group-picker-sep";
+    picker.appendChild(sep);
+    const clearBtn = document.createElement("button");
+    clearBtn.type = "button";
+    clearBtn.className = "group-picker-clear";
+    clearBtn.textContent = "Remove from group";
+    clearBtn.addEventListener("mousedown", (e) => {
+      e.preventDefault();
+      dismiss();
+      void assignGroup(conn, "");
+    });
+    picker.appendChild(clearBtn);
+  }
+
+  document.body.appendChild(picker);
+
+  const r = anchor.getBoundingClientRect();
+  picker.style.left = `${r.left}px`;
+  picker.style.top = `${r.bottom + 4}px`;
+  requestAnimationFrame(() => {
+    const pr = picker.getBoundingClientRect();
+    if (pr.right > window.innerWidth)
+      picker.style.left = `${window.innerWidth - pr.width - 8}px`;
+    if (pr.bottom > window.innerHeight) picker.style.top = `${r.top - pr.height - 4}px`;
+  });
+
+  const dismiss = () => {
+    if (document.body.contains(picker)) document.body.removeChild(picker);
+    document.removeEventListener("mousedown", onOut);
+  };
+
+  const save = () => {
+    const v = input.value.trim();
+    dismiss();
+    if (v !== (conn.group || "")) void assignGroup(conn, v);
+  };
+
+  const onOut = (e: MouseEvent) => {
+    if (!picker.contains(e.target as Node)) save();
+  };
+
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      save();
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      dismiss();
+    }
+  });
+
+  setTimeout(() => {
+    input.focus();
+    input.select();
+    document.addEventListener("mousedown", onOut);
+  }, 0);
+}
+
+async function assignGroup(conn: Connection, group: string): Promise<void> {
+  try {
+    await window.api.saveConnection({
+      id: conn.id,
+      friendlyName: conn.friendlyName,
+      hostname: conn.hostname,
+      port: conn.port,
+      protocol: conn.protocol,
+      username: conn.username,
+      group,
+      notes: conn.notes,
+      sshKeyPath: conn.sshKeyPath,
+      jumpHost: conn.jumpHost,
+      jumpPort: conn.jumpPort,
+      keepExistingPassword: true,
+      keepExistingSshKeyPassphrase: true,
+    });
+    await refreshConnections();
+    renderSidebar();
+    if (selectedId === conn.id) renderDetail();
+  } catch {
+    showToast("Could not update group.", "error");
   }
 }
 
@@ -2420,7 +2895,7 @@ function renderDetail() {
 
   const isHttpProto = proto === "http" || proto === "https";
   const httpTestBtn = isHttpProto
-    ? `<button class="cmd-btn" data-action="test-http" data-id="${conn.id}">⚡ Test</button>`
+    ? `<button class="cmd-btn" data-action="test-http" data-id="${conn.id}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg> Test</button>`
     : "";
 
   const jumpRow = conn.jumpHost
@@ -2524,7 +2999,7 @@ function renderDetail() {
 function renderEmptyState() {
   detailPanel.innerHTML = `
     <div class="detail-empty">
-      <div class="detail-empty-icon">⚡</div>
+      <div class="detail-empty-icon"><svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
       <div class="detail-empty-title">Welcome to TunnelDesk</div>
       <div class="detail-empty-sub">Get started in 3 steps</div>
       <div class="onboarding-steps">
@@ -2561,6 +3036,20 @@ function renderEmptyState() {
   });
 }
 
+// ─── Policy Banner ────────────────────────────────────────────────────────────
+
+function applyPolicyBanner(policy: PolicyState) {
+  const banner = document.getElementById("policy-banner");
+  const text = document.getElementById("policy-banner-text");
+  if (!banner || !text) return;
+  if (policy.bannerMessage) {
+    text.textContent = policy.bannerMessage;
+    banner.classList.remove("hidden");
+  } else {
+    banner.classList.add("hidden");
+  }
+}
+
 // ─── Settings Panel ───────────────────────────────────────────────────────────
 
 function renderSettingsPanel() {
@@ -2570,6 +3059,37 @@ function renderSettingsPanel() {
     return;
   }
 
+  const policy = currentPolicy;
+  const auth = currentAuthStatus;
+  const clientIdLocked = !!policy.clientId;
+  const tenantIdLocked = !!policy.tenantId;
+  const syncUrlLocked = !!policy.configSyncUrl;
+
+  // Build policy restrictions text for the Enterprise section.
+  const policyItems: string[] = [];
+  if (policy.enforceSSO) policyItems.push("SSO enforced — sign-in required to connect");
+  if (clientIdLocked) policyItems.push("Client ID locked by administrator");
+  if (tenantIdLocked) policyItems.push("Tenant ID locked by administrator");
+  if (syncUrlLocked) policyItems.push("Config sync URL locked by administrator");
+  if (policy.disableManualConnections)
+    policyItems.push("Adding manual connections disabled");
+  if (policy.allowedProtocols?.length) {
+    policyItems.push(`Allowed protocols: ${policy.allowedProtocols.join(", ")}`);
+  }
+
+  const effectiveClientId = policy.clientId || s.entraClientId || "";
+  const effectiveTenantId = policy.tenantId || s.entraTenantId || "common";
+  const effectiveSyncUrl = policy.configSyncUrl || s.configSyncUrl || "";
+
+  const userInitials = auth.user
+    ? auth.user.name
+        .split(" ")
+        .map((w) => w[0])
+        .join("")
+        .toUpperCase()
+        .slice(0, 2)
+    : "";
+
   detailPanel.innerHTML = `
     <div class="settings-panel">
       <div class="detail-header" style="margin-bottom:20px">
@@ -2577,6 +3097,96 @@ function renderSettingsPanel() {
           <h1 class="detail-title">Settings</h1>
         </div>
       </div>
+
+      <div class="prop-section-label">Account</div>
+      <div class="settings-list">
+        <div class="settings-row settings-row--col">
+          <div class="settings-row-label">
+            <span class="settings-label">Azure App Registration</span>
+            <span class="settings-desc">Enter the Client ID and Tenant ID from your Azure App Registration. The app must be a public client with redirect URI <code>http://localhost</code>.</span>
+          </div>
+          <div class="auth-fields-row" style="margin-top:8px">
+            <input class="form-input" type="text" id="s-entra-client-id"
+              placeholder="Client ID (GUID)"
+              value="${escapeHtml(effectiveClientId)}"
+              ${clientIdLocked ? "disabled" : ""}
+              autocomplete="off" spellcheck="false" />
+            <input class="form-input" type="text" id="s-entra-tenant-id"
+              placeholder="Tenant ID or 'common'"
+              value="${escapeHtml(effectiveTenantId)}"
+              ${tenantIdLocked ? "disabled" : ""}
+              autocomplete="off" spellcheck="false" />
+          </div>
+          ${clientIdLocked || tenantIdLocked ? `<div class="policy-lock-note"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Some fields are locked by your organization's policy.</div>` : ""}
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Microsoft account</span>
+            <span class="settings-desc">Sign in to enable organization features. Requires Client ID above.</span>
+          </div>
+          ${
+            auth.signedIn && auth.user
+              ? `<div class="auth-user-card">
+                <div class="auth-avatar">${userInitials}</div>
+                <div class="auth-user-info">
+                  <div class="auth-user-name">${escapeHtml(auth.user.name)}</div>
+                  <div class="auth-user-email">${escapeHtml(auth.user.email)}</div>
+                </div>
+                <button class="btn btn-ghost btn-sm" id="s-sign-out">Sign out</button>
+              </div>`
+              : `<button class="btn btn-secondary btn-sm" id="s-sign-in" ${!effectiveClientId ? "disabled" : ""}>Sign in with Microsoft</button>`
+          }
+        </div>
+      </div>
+
+      <div class="prop-section-label" style="margin-top:22px">Organization</div>
+      <div class="settings-list">
+        <div class="settings-row settings-row--col">
+          <div class="settings-row-label">
+            <span class="settings-label">Config sync URL</span>
+            <span class="settings-desc">HTTPS URL to a <code>tunneldesk-policy.json</code> file published by your admin (Azure Blob, SharePoint CDN, or any static HTTPS host).</span>
+          </div>
+          <input class="form-input" type="text" id="s-sync-url"
+            placeholder="https://company.blob.core.windows.net/config/tunneldesk-policy.json"
+            value="${escapeHtml(effectiveSyncUrl)}"
+            ${syncUrlLocked ? "disabled" : ""}
+            style="margin-top:8px"
+            autocomplete="off" spellcheck="false" />
+          ${syncUrlLocked ? `<div class="policy-lock-note"><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg> Locked by policy.</div>` : ""}
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Sync interval</span>
+            <span class="settings-desc">How often to re-fetch the policy file.</span>
+          </div>
+          <select class="form-input settings-select" id="s-sync-interval">
+            <option value="60" ${(s.configSyncInterval ?? 300) === 60 ? "selected" : ""}>1 minute</option>
+            <option value="300" ${(s.configSyncInterval ?? 300) === 300 ? "selected" : ""}>5 minutes (default)</option>
+            <option value="900" ${s.configSyncInterval === 900 ? "selected" : ""}>15 minutes</option>
+            <option value="1800" ${s.configSyncInterval === 1800 ? "selected" : ""}>30 minutes</option>
+            <option value="3600" ${s.configSyncInterval === 3600 ? "selected" : ""}>1 hour</option>
+          </select>
+        </div>
+        <div class="settings-row" id="s-sync-status-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Sync status</span>
+            <span class="settings-desc" id="s-sync-status-text">Loading…</span>
+          </div>
+          <button class="btn btn-secondary btn-sm" id="s-sync-now" ${!effectiveSyncUrl ? "disabled" : ""}>Sync Now</button>
+        </div>
+      </div>
+
+      ${
+        policyItems.length > 0
+          ? `
+      <div class="prop-section-label" style="margin-top:22px">Enterprise Policy</div>
+      <div class="settings-list">
+        <div class="policy-restrictions-box">
+          ${policyItems.map((item) => `<div class="policy-restriction-item"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>${escapeHtml(item)}</div>`).join("")}
+        </div>
+      </div>`
+          : ""
+      }
 
       <div class="prop-section-label">General</div>
       <div class="settings-list">
@@ -2653,7 +3263,7 @@ function renderSettingsPanel() {
             <span class="settings-desc">Leave empty to use cloudflared from your system PATH. Useful for corporate tools directories.</span>
           </div>
           <div class="form-file-row" style="margin-top:8px">
-            <input class="form-input" type="text" id="s-cf-path" placeholder="${window.api.platform === "win32" ? "e.g. C:\\tools\\cloudflared.exe" : "e.g. /usr/local/bin/cloudflared"}" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
+            <input class="form-input" type="text" id="s-cf-path" placeholder="${window.api.platform === "win32" ? "e.g. C:\\tools\\cloudflared.exe" : window.api.platform === "darwin" ? "e.g. /usr/local/bin/cloudflared" : "e.g. /usr/local/bin/cloudflared"}" value="${escapeHtml(s.cloudflaredPath)}" autocomplete="off" />
             <button type="button" class="btn btn-secondary btn-sm" id="s-cf-browse">Browse</button>
             <button type="button" class="btn btn-ghost btn-sm" id="s-cf-clear" title="Reset to PATH">&times;</button>
           </div>
@@ -2664,7 +3274,7 @@ function renderSettingsPanel() {
             <span class="settings-desc">Pre-fills the save dialog when downloading files via SFTP. Leave empty to use the system default.</span>
           </div>
           <div class="form-file-row" style="margin-top:8px">
-            <input class="form-input" type="text" id="s-sftp-dl" placeholder="e.g. ${window.api.platform === "win32" ? "C:\\Users\\You\\Downloads" : "~/Downloads"}" value="${escapeHtml(s.sftpDownloadFolder)}" autocomplete="off" />
+            <input class="form-input" type="text" id="s-sftp-dl" placeholder="e.g. ${window.api.platform === "win32" ? "C:\\Users\\You\\Downloads" : "~/Downloads"}" value="${escapeHtml(s.sftpDownloadFolder)}" autocomplete="off" spellcheck="false" />
             <button type="button" class="btn btn-secondary btn-sm" id="s-sftp-dl-browse">Browse</button>
             <button type="button" class="btn btn-ghost btn-sm" id="s-sftp-dl-clear" title="Clear">&times;</button>
           </div>
@@ -2715,6 +3325,92 @@ function renderSettingsPanel() {
       </div>
     </div>
   `;
+
+  initCustomSelects(detailPanel);
+
+  // ── Sync status display ──────────────────────────────────────────────────
+  const syncStatusText = document.getElementById("s-sync-status-text") as HTMLElement;
+  void window.api
+    .getSyncStatus()
+    .then((st) => {
+      if (!syncStatusText) return;
+      if (st.lastSyncError) {
+        syncStatusText.textContent = `Error: ${st.lastSyncError}`;
+        syncStatusText.style.color = "var(--error)";
+      } else if (st.lastSyncTime) {
+        const ago = Math.round((Date.now() - st.lastSyncTime) / 1000);
+        const fmtAgo =
+          ago < 60
+            ? `${ago}s ago`
+            : ago < 3600
+              ? `${Math.round(ago / 60)}m ago`
+              : `${Math.round(ago / 3600)}h ago`;
+        syncStatusText.textContent = `Last synced ${fmtAgo} — ${st.count} managed connection${st.count !== 1 ? "s" : ""}`;
+      } else {
+        syncStatusText.textContent = effectiveSyncUrl
+          ? "Not yet synced"
+          : "No sync URL configured";
+      }
+    })
+    .catch(() => {});
+
+  // ── Sync Now ─────────────────────────────────────────────────────────────
+  document.getElementById("s-sync-now")?.addEventListener("click", async () => {
+    const btn = document.getElementById("s-sync-now") as HTMLButtonElement;
+    btn.disabled = true;
+    btn.textContent = "Syncing…";
+    try {
+      const res = await window.api.syncFetchNow();
+      showToast(
+        `Synced — ${res.count} connection${res.count !== 1 ? "s" : ""} pulled.`,
+        "success",
+      );
+      if (syncStatusText)
+        syncStatusText.textContent = `Just synced — ${res.count} managed connection${res.count !== 1 ? "s" : ""}`;
+    } catch (err) {
+      showToast(errorMsg(err, "Sync failed."), "error");
+    } finally {
+      btn.disabled = false;
+      btn.textContent = "Sync Now";
+    }
+  });
+
+  // ── Sign in ──────────────────────────────────────────────────────────────
+  document.getElementById("s-sign-in")?.addEventListener("click", async () => {
+    const btn = document.getElementById("s-sign-in") as HTMLButtonElement;
+    const cid = (
+      document.getElementById("s-entra-client-id") as HTMLInputElement
+    )?.value.trim();
+    const tid =
+      (document.getElementById("s-entra-tenant-id") as HTMLInputElement)?.value.trim() ||
+      "common";
+    if (!cid) {
+      showToast("Enter a Client ID first.", "error");
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = "Opening sign-in…";
+    try {
+      // Save IDs before triggering the auth window.
+      await window.api.saveSettings({ entraClientId: cid, entraTenantId: tid });
+      const user = await window.api.authSignIn(cid, tid);
+      currentAuthStatus = { signedIn: true, user };
+      showToast(`Signed in as ${user.name}`, "success");
+      renderSettingsPanel();
+    } catch (err) {
+      showToast(errorMsg(err, "Sign-in failed."), "error");
+      btn.disabled = false;
+      btn.textContent = "Sign in with Microsoft";
+    }
+  });
+
+  // ── Sign out ─────────────────────────────────────────────────────────────
+  document.getElementById("s-sign-out")?.addEventListener("click", async () => {
+    await window.api.authSignOut();
+    currentAuthStatus = { signedIn: false, user: null };
+    showToast("Signed out.", "success");
+    renderSettingsPanel();
+  });
 
   const cfPathInput = document.getElementById("s-cf-path") as HTMLInputElement;
   document.getElementById("s-cf-browse")!.addEventListener("click", async () => {
@@ -2803,6 +3499,22 @@ function renderSettingsPanel() {
       (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
     const osCacheDurationHours =
       Number((document.getElementById("s-os-cache") as HTMLSelectElement)?.value) || 6;
+    const entraClientId = clientIdLocked
+      ? effectiveClientId
+      : ((
+          document.getElementById("s-entra-client-id") as HTMLInputElement
+        )?.value.trim() ?? "");
+    const entraTenantId = tenantIdLocked
+      ? effectiveTenantId
+      : (
+          document.getElementById("s-entra-tenant-id") as HTMLInputElement
+        )?.value.trim() || "common";
+    const configSyncUrl = syncUrlLocked
+      ? effectiveSyncUrl
+      : ((document.getElementById("s-sync-url") as HTMLInputElement)?.value.trim() ?? "");
+    const configSyncInterval =
+      Number((document.getElementById("s-sync-interval") as HTMLSelectElement)?.value) ||
+      300;
     try {
       currentSettings = await window.api.saveSettings({
         minimizeToTray: minTray,
@@ -2814,6 +3526,10 @@ function renderSettingsPanel() {
         theme,
         autoReconnect,
         osCacheDurationHours,
+        entraClientId,
+        entraTenantId,
+        configSyncUrl,
+        configSyncInterval,
       });
       applyTheme(theme);
       showToast("Settings saved.", "success");
@@ -2961,31 +3677,7 @@ async function handleAction(action: string, id: string, value?: string) {
 // ─── Confirm Modal ────────────────────────────────────────────────────────────
 
 function showConfirm(message: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    confirmMsg.textContent = message;
-    confirmModal.classList.remove("hidden");
-    confirmModal.offsetHeight;
-    confirmModal.classList.add("open");
-
-    const cleanup = (result: boolean) => {
-      confirmModal.classList.remove("open");
-      setTimeout(() => confirmModal.classList.add("hidden"), 160);
-      confirmOkBtn.removeEventListener("click", onOk);
-      confirmCancel.removeEventListener("click", onCancel);
-      confirmModal.removeEventListener("click", onBackdrop);
-      resolve(result);
-    };
-
-    const onOk = () => cleanup(true);
-    const onCancel = () => cleanup(false);
-    const onBackdrop = (e: MouseEvent) => {
-      if (e.target === confirmModal) cleanup(false);
-    };
-
-    confirmOkBtn.addEventListener("click", onOk);
-    confirmCancel.addEventListener("click", onCancel);
-    confirmModal.addEventListener("click", onBackdrop);
-  });
+  return window.api.openConfirmWindow(message);
 }
 
 // ─── Modal ────────────────────────────────────────────────────────────────────
@@ -3017,6 +3709,7 @@ function resetForm() {
     PROTOCOL_DEFAULT_PORTS[currentSettings?.defaultProtocol ?? "rdp-cf"] ?? 3389,
   );
   protocolInput.value = currentSettings?.defaultProtocol ?? "rdp-cf";
+  refreshCustomSelect(protocolInput);
   groupInput.value = "";
   usernameInput.value = "";
   passwordInput.value = "";
@@ -3127,7 +3820,7 @@ document.addEventListener("keydown", (e) => {
   }
   if (e.ctrlKey && e.shiftKey && (e.key === "O" || e.key === "o")) {
     e.preventDefault();
-    document.getElementById("quick-connect")?.click();
+    void window.api.openQcWindow();
     return;
   }
   if (e.ctrlKey && e.key === "n") {
@@ -3175,11 +3868,11 @@ function navigateSidebar(direction: 1 | -1) {
 
 async function refreshConnections() {
   try {
-    connections = await window.api.loadConnections();
+    let userConns = await window.api.loadConnections();
     // Apply custom order if set, hide temp connections from sidebar
     const order = currentSettings?.connectionOrder ?? [];
     if (order.length > 0) {
-      connections = connections.sort((a, b) => {
+      userConns = userConns.sort((a, b) => {
         const ai = order.indexOf(a.id);
         const bi = order.indexOf(b.id);
         if (ai === -1 && bi === -1) return 0;
@@ -3188,6 +3881,10 @@ async function refreshConnections() {
         return ai - bi;
       });
     }
+    managedConnections = await window.api.getManagedConnections();
+    // Merge: user connections first, then managed (dedup by id).
+    const userIds = new Set(userConns.map((c) => c.id));
+    connections = [...userConns, ...managedConnections.filter((m) => !userIds.has(m.id))];
     const loaded = await window.api.getStatuses();
     for (const key of Object.keys(statuses)) delete statuses[key];
     Object.assign(statuses, loaded);
@@ -3203,7 +3900,7 @@ async function refreshConnections() {
 
 // ─── Log resize handle ────────────────────────────────────────────────────────
 
-if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
   const logResizeHandle = document.getElementById("log-resize-handle") as HTMLElement;
   const logPanelEl = document.querySelector(".log-panel") as HTMLElement;
   let resizeDragging = false;
@@ -3238,7 +3935,7 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
 
 // ─── IPC ──────────────────────────────────────────────────────────────────────
 
-if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
   window.api.onConnectionSaved(async () => {
     await refreshConnections();
   });
@@ -3247,16 +3944,40 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
 // Keep currentSettings in sync across all windows (e.g. osCache saved from terminal window).
 window.api.onSettingsDidChange((settings) => {
   currentSettings = settings;
-  if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+  if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
     renderSidebar();
   }
 });
 
-if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
+  window.api.onManagedConnectionsUpdated(({ connections: managed }) => {
+    managedConnections = managed;
+    const userIds = new Set(connections.filter((c) => !c.managed).map((c) => c.id));
+    connections = [
+      ...connections.filter((c) => !c.managed),
+      ...managed.filter((m) => !userIds.has(m.id)),
+    ];
+    renderSidebar();
+    renderDetail();
+  });
+
+  window.api.onPolicyUpdated((policy) => {
+    currentPolicy = policy;
+    applyPolicyBanner(policy);
+    renderSidebar();
+    if (settingsView) renderSettingsPanel();
+  });
+}
+
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
   const updateBanner = document.getElementById("update-banner") as HTMLElement;
   const updateBannerText = document.getElementById("update-banner-text") as HTMLElement;
-  const updateBannerLink = document.getElementById("update-banner-link") as HTMLAnchorElement;
-  const updateBannerDismiss = document.getElementById("update-banner-dismiss") as HTMLButtonElement;
+  const updateBannerLink = document.getElementById(
+    "update-banner-link",
+  ) as HTMLAnchorElement;
+  const updateBannerDismiss = document.getElementById(
+    "update-banner-dismiss",
+  ) as HTMLButtonElement;
 
   window.api.onUpdateAvailable(({ version, url }) => {
     updateBannerText.textContent = `TunnelDesk v${version} is available —`;
@@ -3332,11 +4053,16 @@ window.api.onDepsStatus((deps) => {
   const missing: string[] = [];
   if (!deps.cloudflared) missing.push("cloudflared");
 
-  const isWin = window.api.platform === "win32";
-  const rdpClientName = deps.rdpClient ?? (isWin ? "mstsc" : "xfreerdp");
-  const rdpLabel = isWin
-    ? "mstsc (Remote Desktop)"
-    : `${rdpClientName} (FreeRDP — install with: sudo apt install freerdp2-x11)`;
+  const platform = window.api.platform;
+  const rdpClientName = deps.rdpClient ?? (platform === "win32" ? "mstsc" : "xfreerdp");
+  let rdpLabel: string;
+  if (platform === "win32") {
+    rdpLabel = "mstsc (Remote Desktop)";
+  } else if (platform === "darwin") {
+    rdpLabel = `${rdpClientName} — install Microsoft Remote Desktop from the App Store (free)`;
+  } else {
+    rdpLabel = `${rdpClientName} — install with: sudo apt install freerdp2-x11`;
+  }
   if (!deps.mstsc) missing.push(rdpLabel);
 
   if (missing.length > 0) {
@@ -3475,6 +4201,52 @@ const termResizeObserver = new ResizeObserver(() => {
 });
 termResizeObserver.observe(detailPanel);
 
+// ─── Confirm window initializer ──────────────────────────────────────────────
+
+async function initConfirmWindow(): Promise<void> {
+  (document.querySelector(".app") as HTMLElement).style.display = "none";
+  const root = document.getElementById("form-window-root") as HTMLElement;
+  root.classList.remove("hidden");
+  root.style.overflow = "hidden";
+
+  const modalCard = document.querySelector("#confirm-modal .modal") as HTMLElement;
+  root.appendChild(modalCard);
+
+  const msgEl = document.getElementById("confirm-message");
+  if (msgEl) msgEl.textContent = CONFIRM_MESSAGE;
+
+  document.getElementById("confirm-ok")?.addEventListener("click", () => {
+    void window.api.confirmResult(true);
+  });
+  document.getElementById("confirm-cancel")?.addEventListener("click", () => {
+    void window.api.confirmResult(false);
+  });
+
+  try {
+    currentSettings = await window.api.getSettings();
+  } catch {}
+  applyTheme(currentSettings?.theme ?? "dark");
+}
+
+// ─── Quick Connect window initializer ────────────────────────────────────────
+
+async function initQcWindow(): Promise<void> {
+  (document.querySelector(".app") as HTMLElement).style.display = "none";
+  const root = document.getElementById("form-window-root") as HTMLElement;
+  root.classList.remove("hidden");
+
+  const modalCard = document.querySelector("#quick-connect-modal .modal") as HTMLElement;
+  modalCard.style.maxWidth = "";
+  root.appendChild(modalCard);
+
+  try {
+    currentSettings = await window.api.getSettings();
+  } catch {}
+  applyTheme(currentSettings?.theme ?? "dark");
+  initCustomSelects(root);
+  setTimeout(() => qcHost?.focus(), 50);
+}
+
 // ─── Form window initializer ──────────────────────────────────────────────────
 
 async function initFormWindow(connId: string | null): Promise<void> {
@@ -3497,6 +4269,7 @@ async function initFormWindow(connId: string | null): Promise<void> {
         hostInput.value = conn.hostname;
         portInput.value = String(conn.port);
         protocolInput.value = conn.protocol || "rdp-cf";
+        refreshCustomSelect(protocolInput);
         groupInput.value = conn.group || "";
         usernameInput.value = conn.username || "";
         passwordInput.value = "";
@@ -3559,7 +4332,7 @@ async function initTerminalWindow(connId: string): Promise<void> {
 
 // ─── Sidebar resize ───────────────────────────────────────────────────────────
 
-if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
+if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDOW) {
   const sidebarResizeHandle = document.getElementById("sidebar-resize-handle");
   const sidebarEl = document.querySelector<HTMLElement>(".sidebar");
   if (sidebarResizeHandle && sidebarEl) {
@@ -3644,23 +4417,25 @@ const qcHost = document.getElementById("qc-host") as HTMLInputElement;
 const qcPort = document.getElementById("qc-port") as HTMLInputElement;
 
 if (quickConnectModal) {
-  const openQc = () => {
-    quickConnectModal.classList.remove("hidden");
-    quickConnectModal.offsetHeight;
-    quickConnectModal.classList.add("open");
-    setTimeout(() => qcHost?.focus(), 50);
-  };
   const closeQc = () => {
+    if (IS_QC_WINDOW) {
+      window.close();
+      return;
+    }
     quickConnectModal.classList.remove("open");
     setTimeout(() => quickConnectModal.classList.add("hidden"), 160);
   };
 
-  document.getElementById("quick-connect")?.addEventListener("click", openQc);
+  if (!IS_QC_WINDOW) {
+    document.getElementById("quick-connect")?.addEventListener("click", () => {
+      void window.api.openQcWindow();
+    });
+    quickConnectModal.addEventListener("click", (e) => {
+      if (e.target === quickConnectModal) closeQc();
+    });
+  }
   document.getElementById("qc-cancel")?.addEventListener("click", closeQc);
   document.getElementById("qc-cancel-top")?.addEventListener("click", closeQc);
-  quickConnectModal.addEventListener("click", (e) => {
-    if (e.target === quickConnectModal) closeQc();
-  });
 
   qcProto?.addEventListener("change", () => {
     if (qcPort) qcPort.value = String(PROTOCOL_DEFAULT_PORTS[qcProto.value] ?? 22);
@@ -3677,7 +4452,7 @@ if (quickConnectModal) {
     const port = Number(qcPort?.value) || 22;
     const user = (document.getElementById("qc-user") as HTMLInputElement)?.value.trim();
     const pass = (document.getElementById("qc-pass") as HTMLInputElement)?.value;
-    closeQc();
+    if (!IS_QC_WINDOW) closeQc();
     try {
       const saved = await window.api.saveConnection({
         friendlyName: `${host} (quick)`,
@@ -3688,11 +4463,15 @@ if (quickConnectModal) {
         password: pass || undefined,
         temp: true,
       } as Parameters<typeof window.api.saveConnection>[0] & { temp?: boolean });
-      await refreshConnections();
-      selectedId = saved.id;
-      renderSidebar();
-      renderDetail();
       await handleAction("connect", saved.id);
+      if (IS_QC_WINDOW) {
+        window.close();
+      } else {
+        await refreshConnections();
+        selectedId = saved.id;
+        renderSidebar();
+        renderDetail();
+      }
     } catch (err) {
       showToast(errorMsg(err, "Quick connect failed."), "error");
     }
@@ -3743,15 +4522,37 @@ async function init() {
     currentSettings = await window.api.getSettings();
   } catch {}
   applyTheme(currentSettings?.theme ?? "dark");
+
+  // Load policy and auth state in background; UI handles missing gracefully.
+  void window.api
+    .getPolicy()
+    .then((p) => {
+      currentPolicy = p;
+      applyPolicyBanner(p);
+    })
+    .catch(() => {});
+  void window.api
+    .authGetStatus()
+    .then((s) => {
+      currentAuthStatus = s;
+    })
+    .catch(() => {});
+
   await refreshConnections();
   // Clean up any leftover temp connections from a previous crash
   void window.api.deleteTempConnections();
 }
 
+initCustomSelects();
+
 if (TERM_WIN_CONN_ID) {
   void initTerminalWindow(TERM_WIN_CONN_ID);
 } else if (IS_FORM_WINDOW) {
   void initFormWindow(FORM_WIN_CONN_ID);
+} else if (IS_QC_WINDOW) {
+  void initQcWindow();
+} else if (IS_CONFIRM_WINDOW) {
+  void initConfirmWindow();
 } else {
   init();
 }

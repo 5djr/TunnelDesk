@@ -10,6 +10,9 @@ const { initLogger, closeLogger } = require("./logger");
 const { createTray } = require("./tray");
 const { connectById, disconnectById } = require("./actions");
 const { checkForUpdate } = require("./updater");
+const { startPolicyPolling } = require("./policy");
+const { startSync } = require("./sync");
+const { getAuthStatus } = require("./auth");
 
 // ─── Chromium memory-reduction flags ─────────────────────────────────────────
 app.commandLine.appendSwitch("disable-gpu-shader-disk-cache");
@@ -38,7 +41,6 @@ process.on("unhandledRejection", (reason) => {
 // ─── Lifecycle ────────────────────────────────────────────────────────────────
 
 app.on("before-quit", () => {
-  const { spawnSync } = require("child_process");
   state.forceQuit = true;
   for (const [, active] of activeConnections) {
     if (active.mstscProc && active.mstscProc.exitCode === null) {
@@ -51,26 +53,13 @@ app.on("before-quit", () => {
         active.proc.kill();
       } catch {}
     }
-    // Remove any RDP credentials stored in Windows Credential Manager so they
-    // don't persist after the app exits. cmdkey is Windows-only; on Linux,
-    // xfreerdp receives credentials as CLI args so nothing needs cleanup.
-    if (process.platform === "win32") {
-      const proto = active.connection && (active.connection.protocol || "rdp-cf");
-      if (proto === "rdp-cf" || proto === "rdp") {
-        const port = active.connection.port;
-        try {
-          spawnSync("cmdkey", [`/delete:TERMSRV/localhost:${port}`], {
-            windowsHide: true,
-            stdio: "ignore",
-          });
-          if (port === 3389) {
-            spawnSync("cmdkey", ["/delete:TERMSRV/localhost"], {
-              windowsHide: true,
-              stdio: "ignore",
-            });
-          }
-        } catch {}
-      }
+    // Remove any RDP credentials stored in Windows Credential Manager.
+    const proto = active.connection && (active.connection.protocol || "rdp-cf");
+    if (proto === "rdp-cf" || proto === "rdp") {
+      try {
+        const { deleteStoredCredential } = require("./rdp");
+        deleteStoredCredential(active.connection.port);
+      } catch {}
     }
   }
   activeConnections.clear();
@@ -97,6 +86,23 @@ app.whenReady().then(async () => {
     checkForUpdate().then((update) => {
       if (update) safeSend("update-available", update);
     });
+
+    // Read Group Policy first (may override sync URL / client ID).
+    startPolicyPolling(5 * 60 * 1000, (policy) => {
+      safeSend("policy-updated", policy);
+    });
+    const { getPolicy } = require("./policy");
+    const policy = getPolicy();
+
+    // Determine effective sync URL and interval (policy overrides user settings).
+    const syncUrl = policy.configSyncUrl || settings.configSyncUrl || "";
+    const syncInterval = policy.syncInterval || settings.configSyncInterval || 300;
+    if (syncUrl) startSync(syncUrl, syncInterval);
+
+    // Try to restore a saved Microsoft sign-in session silently.
+    const clientId = policy.clientId || settings.entraClientId || "";
+    const tenantId = policy.tenantId || settings.entraTenantId || "common";
+    if (clientId) getAuthStatus(clientId, tenantId).catch(() => {});
 
     if (settings.minimizeToTray) {
       createTray(

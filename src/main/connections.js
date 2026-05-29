@@ -74,6 +74,7 @@ function sanitizeForRenderer(conn) {
     jumpHost: conn.jumpHost || "",
     jumpPort: conn.jumpPort ? normalizePort(conn.jumpPort) : null,
     temp: !!conn.temp,
+    managed: !!conn.managed,
   };
 }
 

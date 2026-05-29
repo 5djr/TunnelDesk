@@ -1,7 +1,12 @@
+"use strict";
+
 const fs = require("fs");
+const os = require("os");
+const path = require("path");
 const { spawn } = require("child_process");
 
 const IS_WIN = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
 const IS_LINUX = process.platform === "linux";
 
 function checkBinary(name) {
@@ -14,11 +19,29 @@ function checkBinary(name) {
   });
 }
 
-// On Linux, prefer xfreerdp3 (FreeRDP v3) then fall back to xfreerdp (v2).
+function checkAppExists(appPath) {
+  try {
+    return fs.existsSync(appPath);
+  } catch {
+    return false;
+  }
+}
+
+// Prefer xfreerdp3 (FreeRDP v3) on Linux, otherwise v2.
+// On macOS check for Microsoft Remote Desktop in /Applications.
 async function findRdpClientBinary() {
   if (IS_WIN) {
     return { binary: "mstsc", found: await checkBinary("mstsc") };
   }
+  if (IS_MAC) {
+    const macPaths = [
+      "/Applications/Microsoft Remote Desktop.app",
+      path.join(os.homedir(), "Applications", "Microsoft Remote Desktop.app"),
+    ];
+    const found = macPaths.some(checkAppExists);
+    return { binary: "Microsoft Remote Desktop", found };
+  }
+  // Linux
   for (const bin of ["xfreerdp3", "xfreerdp"]) {
     if (await checkBinary(bin)) return { binary: bin, found: true };
   }
@@ -33,7 +56,7 @@ async function checkDependencies() {
   return {
     cloudflared,
     mstsc: rdp.found, // kept for backward compat with renderer
-    rdpClient: rdp.binary, // actual binary name used in error messages
+    rdpClient: rdp.binary,
     rdpClientFound: rdp.found,
   };
 }
@@ -71,7 +94,6 @@ function getProcessMemoryBytesWindows(pid) {
 }
 
 // ─── Process memory — Linux ───────────────────────────────────────────────────
-// Reads VmRSS from /proc/<pid>/status — no external command needed.
 function getProcessMemoryBytesLinux(pid) {
   return new Promise((resolve) => {
     fs.readFile(`/proc/${pid}/status`, "utf8", (err, data) => {
@@ -82,9 +104,29 @@ function getProcessMemoryBytesLinux(pid) {
   });
 }
 
+// ─── Process memory — macOS ───────────────────────────────────────────────────
+// `ps -p PID -o rss=` returns the resident set size in KB.
+function getProcessMemoryBytesDarwin(pid) {
+  return new Promise((resolve) => {
+    const proc = spawn("ps", ["-p", String(pid), "-o", "rss="], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let out = "";
+    proc.stdout.on("data", (d) => {
+      out += d.toString();
+    });
+    proc.on("close", () => {
+      const kb = parseInt(out.trim());
+      resolve(isNaN(kb) ? null : kb * 1024);
+    });
+    proc.on("error", () => resolve(null));
+  });
+}
+
 function getProcessMemoryBytes(pid) {
   if (!pid) return Promise.resolve(null);
   if (IS_WIN) return getProcessMemoryBytesWindows(pid);
+  if (IS_MAC) return getProcessMemoryBytesDarwin(pid);
   if (IS_LINUX) return getProcessMemoryBytesLinux(pid);
   return Promise.resolve(null);
 }

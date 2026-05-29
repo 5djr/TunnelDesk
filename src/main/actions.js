@@ -11,7 +11,12 @@ const { closeTelnetSessionsForConnection } = require("./telnet-session");
 
 async function connectById(connectionId) {
   const connections = await readConnections();
-  const connection = connections.find((item) => item.id === connectionId);
+  let connection = connections.find((item) => item.id === connectionId);
+  if (!connection) {
+    // Fall back to org-managed connections (not stored in connections.json).
+    const { getManagedConnections } = require("./sync");
+    connection = getManagedConnections().find((item) => item.id === connectionId);
+  }
   if (!connection) throw new Error("Connection not found");
 
   const password =

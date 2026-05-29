@@ -17,6 +17,10 @@ const DEFAULTS = {
   autoReconnectAttempts: 3,
   osCache: {},
   osCacheDurationHours: 6,
+  entraClientId: "",
+  entraTenantId: "common",
+  configSyncUrl: "",
+  configSyncInterval: 300,
 };
 
 const VALID_PROTOCOLS = new Set([
@@ -112,6 +116,22 @@ async function writeSettings(partial) {
     safe.osCacheDurationHours = Math.max(
       1,
       Math.min(168, Math.floor(partial.osCacheDurationHours)),
+    );
+  }
+  if (typeof partial.entraClientId === "string") {
+    safe.entraClientId = partial.entraClientId.trim().slice(0, 128);
+  }
+  if (typeof partial.entraTenantId === "string") {
+    safe.entraTenantId = partial.entraTenantId.trim().slice(0, 128) || "common";
+  }
+  if (typeof partial.configSyncUrl === "string") {
+    const u = partial.configSyncUrl.trim();
+    if (!u || u.startsWith("https://")) safe.configSyncUrl = u.slice(0, 1024);
+  }
+  if (typeof partial.configSyncInterval === "number") {
+    safe.configSyncInterval = Math.max(
+      60,
+      Math.min(86400, Math.floor(partial.configSyncInterval)),
     );
   }
   const merged = { ...current, ...safe };

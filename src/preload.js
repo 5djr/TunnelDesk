@@ -20,6 +20,9 @@ contextBridge.exposeInMainWorld("api", {
   openTermWindow: (connId, label) =>
     ipcRenderer.invoke("open-term-window", { connId, label }),
   openFormWindow: (connId) => ipcRenderer.invoke("open-form-window", { connId }),
+  openQcWindow: () => ipcRenderer.invoke("open-qc-window"),
+  openConfirmWindow: (message) => ipcRenderer.invoke("open-confirm-window", { message }),
+  confirmResult: (result) => ipcRenderer.invoke("confirm-result", result),
   sshReportStatus: (connId, ok) =>
     ipcRenderer.invoke("ssh-report-status", { connId, ok }),
   // Replace any prior listener before adding so repeated calls don't accumulate.
@@ -108,5 +111,26 @@ contextBridge.exposeInMainWorld("api", {
   onUpdateAvailable: (callback) => {
     ipcRenderer.removeAllListeners("update-available");
     ipcRenderer.on("update-available", (_, data) => callback(data));
+  },
+
+  // ─── Entra ID / MSAL auth ────────────────────────────────────────────────
+  authSignIn: (clientId, tenantId) =>
+    ipcRenderer.invoke("auth-sign-in", { clientId, tenantId }),
+  authSignOut: () => ipcRenderer.invoke("auth-sign-out"),
+  authGetStatus: () => ipcRenderer.invoke("auth-get-status"),
+
+  // ─── Config sync ─────────────────────────────────────────────────────────
+  syncFetchNow: () => ipcRenderer.invoke("sync-fetch-now"),
+  getManagedConnections: () => ipcRenderer.invoke("get-managed-connections"),
+  getSyncStatus: () => ipcRenderer.invoke("get-sync-status"),
+  getPolicy: () => ipcRenderer.invoke("get-policy"),
+
+  onManagedConnectionsUpdated: (callback) => {
+    ipcRenderer.removeAllListeners("managed-connections-updated");
+    ipcRenderer.on("managed-connections-updated", (_, data) => callback(data));
+  },
+  onPolicyUpdated: (callback) => {
+    ipcRenderer.removeAllListeners("policy-updated");
+    ipcRenderer.on("policy-updated", (_, data) => callback(data));
   },
 });

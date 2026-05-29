@@ -1,15 +1,16 @@
 {
   "name": "tunneldesk",
   "productName": "TunnelDesk",
-  "version": "0.2.2",
-  "description": "Cloudflare Zero Trust connection manager for Windows and Linux",
+  "version": "0.2.3",
+  "description": "Cloudflare Zero Trust connection manager for Windows, Linux, and macOS",
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
     "build:renderer": "vite build",
     "dev": "npm run build:renderer && electron .",
     "dist": "npm run build:renderer && electron-builder --win --x64",
-    "dist:linux": "npm run build:renderer && electron-builder --linux --x64"
+    "dist:linux": "npm run build:renderer && electron-builder --linux --x64",
+    "dist:mac": "npm run build:renderer && electron-builder --mac"
   },
   "build": {
     "appId": "com.tunneldesk.app",
@@ -75,10 +76,49 @@
       "category": "Network",
       "description": "Cloudflare Zero Trust connection manager"
     },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.png",
+      "category": "public.app-category.utilities",
+      "minimumSystemVersion": "12.0",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false
+    },
+    "dmg": {
+      "title": "TunnelDesk",
+      "contents": [
+        {
+          "x": 130,
+          "y": 180
+        },
+        {
+          "x": 410,
+          "y": 180,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
     "asar": true,
     "asarUnpack": []
   },
   "dependencies": {
+    "@azure/msal-node": "^5.2.2",
     "ssh2": "^1.16.0"
   },
   "devDependencies": {

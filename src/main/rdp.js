@@ -1,14 +1,20 @@
+"use strict";
+
 const fs = require("fs");
+const { promises: fsP } = require("fs");
+const os = require("os");
+const path = require("path");
 const { spawn } = require("child_process");
+const { shell } = require("electron");
 const { activeConnections } = require("./state");
 const { safeSend, sendConnectionLog, updateStatus } = require("./messaging");
 
 const IS_WIN = process.platform === "win32";
+const IS_MAC = process.platform === "darwin";
+// Linux is the fallback (process.platform === 'linux')
 
 // ─── Linux helpers ────────────────────────────────────────────────────────────
 
-// Terminal emulators tried in order of preference. x-terminal-emulator is the
-// Debian/Ubuntu update-alternatives default; qterminal is the Kali default.
 const LINUX_TERMINALS = [
   "x-terminal-emulator",
   "gnome-terminal",
@@ -19,7 +25,7 @@ const LINUX_TERMINALS = [
   "xterm",
 ];
 
-let _linuxTerminalCache = undefined; // undefined = not checked yet, null = none found
+let _linuxTerminalCache = undefined;
 
 async function findLinuxTerminal() {
   if (_linuxTerminalCache !== undefined) return _linuxTerminalCache;
@@ -38,8 +44,6 @@ async function findLinuxTerminal() {
   return null;
 }
 
-// Build args to launch a command inside a terminal emulator.
-// Each terminal has its own flag conventions.
 function buildTermArgs(term, title, cmd) {
   switch (term) {
     case "gnome-terminal":
@@ -49,12 +53,10 @@ function buildTermArgs(term, title, cmd) {
     case "xterm":
       return ["-title", title, "-e", ...cmd];
     default:
-      // x-terminal-emulator, qterminal, xfce4-terminal, lxterminal, etc.
       return ["-e", cmd.join(" ")];
   }
 }
 
-// Cache the detected xfreerdp binary (prefer xfreerdp3 / FreeRDP v3 over v2).
 let _rdpBinaryCache = undefined;
 
 async function findRdpBinary() {
@@ -74,31 +76,55 @@ async function findRdpBinary() {
   return null;
 }
 
-// Build xfreerdp argument list. The /cert flag changed between v2 (/cert-ignore)
-// and v3 (/cert:ignore), so we adapt based on which binary was found.
 function buildXfreeRdpArgs(host, port, username, password, binary) {
   const certFlag = binary === "xfreerdp" ? "/cert-ignore" : "/cert:ignore";
   const args = [`/v:${host}:${port}`, certFlag, "/dynamic-resolution", "+clipboard"];
   if (username) args.push(`/u:${username}`);
+  // Password passed as argument to xfreerdp — visible in process list (xfreerdp limitation).
   if (password) args.push(`/p:${password}`);
   return args;
 }
 
-// ─── External RDP watcher ─────────────────────────────────────────────────────
-// After the tracked RDP client exits (while cloudflared is still alive), poll
-// the local port so we notice if the user opens their own client and reconnects
-// through the still-running tunnel. Clears the "RDP Disconnected" UI state.
+// ─── macOS helpers ────────────────────────────────────────────────────────────
 
-const rdpWatchers = new Map(); // connectionId -> setTimeout handle
+// Write a .rdp file to a temp path and open it with the default handler
+// (Microsoft Remote Desktop from the App Store, or any registered handler).
+async function writeTempRdpFile(connectionId, host, port, username) {
+  const tmpPath = path.join(os.tmpdir(), `tunneldesk-${connectionId}-${Date.now()}.rdp`);
+  const lines = [
+    "screen mode id:i:2",
+    `full address:s:${host}:${port}`,
+    username ? `username:s:${username}` : null,
+    "audiomode:i:0",
+    "autoreconnection enabled:i:1",
+    "authentication level:i:2",
+    "negotiate security layer:i:1",
+    "prompt for credentials:i:1",
+    "enablecredsspsupport:i:1",
+  ].filter(Boolean);
+  await fsP.writeFile(tmpPath, lines.join("\r\n") + "\r\n", "utf8");
+  return tmpPath;
+}
+
+function cleanupTempRdpFile(tmpPath, delayMs = 8000) {
+  setTimeout(() => fsP.unlink(tmpPath).catch(() => {}), delayMs);
+}
+
+// ─── External RDP watcher ─────────────────────────────────────────────────────
+
+const rdpWatchers = new Map();
 
 function checkRdpActive(port) {
   return new Promise((resolve) => {
     let proc;
-    // Windows: netstat -n -p TCP (ESTABLISHED lines include the state)
-    // Linux:   ss -tn state established (rows are already filtered)
     if (IS_WIN) {
       proc = spawn("netstat", ["-n", "-p", "TCP"], {
         windowsHide: true,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+    } else if (IS_MAC) {
+      // lsof is available on all macOS versions; filters ESTABLISHED connections on the port.
+      proc = spawn("lsof", ["-i", `TCP:${port}`, "-n", "-P"], {
         stdio: ["ignore", "pipe", "ignore"],
       });
     } else {
@@ -112,11 +138,18 @@ function checkRdpActive(port) {
       if (out.length < 65536) out += d.toString();
     });
     proc.on("close", () => {
-      const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
-      const found = out.split("\n").some((line) => {
-        if (IS_WIN) return portRe.test(line) && line.includes("ESTABLISHED");
-        return portRe.test(line); // ss already filters for ESTABLISHED
-      });
+      let found = false;
+      if (IS_WIN) {
+        const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
+        found = out.split("\n").some((l) => portRe.test(l) && l.includes("ESTABLISHED"));
+      } else if (IS_MAC) {
+        // lsof with -n -P shows "ESTABLISHED" in the NAME column for active connections.
+        const portRe = new RegExp(`:${port}(?:\\s|->|$)`);
+        found = out.split("\n").some((l) => portRe.test(l) && l.includes("ESTABLISHED"));
+      } else {
+        const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
+        found = out.split("\n").some((l) => portRe.test(l));
+      }
       resolve(found);
     });
     proc.on("error", () => resolve(false));
@@ -136,7 +169,11 @@ function startRdpWatcher(connectionId, port) {
 
   const poll = async () => {
     const entry = activeConnections.get(connectionId);
-    const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
+    if (!entry) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+    const cfAlive = entry.proc && entry.proc.exitCode === null;
     if (!cfAlive) {
       rdpWatchers.delete(connectionId);
       return;
@@ -149,7 +186,11 @@ function startRdpWatcher(connectionId, port) {
     const isActive = await checkRdpActive(port);
 
     const e = activeConnections.get(connectionId);
-    const stillCf = e && e.proc && e.proc.exitCode === null;
+    if (!e) {
+      rdpWatchers.delete(connectionId);
+      return;
+    }
+    const stillCf = e.proc && e.proc.exitCode === null;
     if (!stillCf) {
       rdpWatchers.delete(connectionId);
       return;
@@ -176,13 +217,24 @@ function startRdpWatcher(connectionId, port) {
 }
 
 // ─── Windows credential management ───────────────────────────────────────────
-// cmdkey stores/removes credentials in the Windows Credential Manager so that
-// mstsc auto-fills them without prompting. Not needed on Linux — xfreerdp
-// accepts /u: and /p: arguments directly.
+// Pass the password via an environment variable so it does not appear in the
+// process arguments visible to other users via Task Manager / WMI.
 
-function runCmdkey(args) {
+function storeCredentialViaEnv(target, username, password) {
   return new Promise((resolve) => {
-    const proc = spawn("cmdkey", args, { windowsHide: true, stdio: "ignore" });
+    // PowerShell reads $env:TUNNELDESK_CRED — the value never appears in cmdline.
+    const script =
+      `cmdkey /delete:"${target}" 2>$null; ` +
+      `cmdkey /add:"${target}" /user:"${username}" /pass:$env:TUNNELDESK_CRED`;
+    const proc = spawn(
+      "powershell",
+      ["-NonInteractive", "-WindowStyle", "Hidden", "-Command", script],
+      {
+        windowsHide: true,
+        stdio: "ignore",
+        env: { ...process.env, TUNNELDESK_CRED: password },
+      },
+    );
     let settled = false;
     const done = () => {
       if (settled) return;
@@ -190,7 +242,42 @@ function runCmdkey(args) {
       clearTimeout(timer);
       resolve();
     };
-    const timer = setTimeout(done, 5000);
+    const timer = setTimeout(done, 6000);
+    proc.on("exit", done);
+    proc.on("error", () => {
+      // PowerShell unavailable — fall back to direct cmdkey (password visible in args).
+      const fallback = spawn(
+        "cmdkey",
+        [`/add:${target}`, `/user:${username}`, `/pass:${password}`],
+        { windowsHide: true, stdio: "ignore" },
+      );
+      const t2 = setTimeout(done, 5000);
+      fallback.on("exit", () => {
+        clearTimeout(t2);
+        done();
+      });
+      fallback.on("error", () => {
+        clearTimeout(t2);
+        done();
+      });
+    });
+  });
+}
+
+function runCmdkeyDelete(target) {
+  return new Promise((resolve) => {
+    const proc = spawn("cmdkey", [`/delete:${target}`], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      resolve();
+    };
+    const t = setTimeout(done, 5000);
     proc.on("exit", done);
     proc.on("error", done);
   });
@@ -201,8 +288,22 @@ async function storeCredential(port, username, password) {
   const targets = [`TERMSRV/localhost:${port}`];
   if (port === 3389) targets.push("TERMSRV/localhost");
   for (const target of targets) {
-    await runCmdkey([`/delete:${target}`]);
-    await runCmdkey([`/add:${target}`, `/user:${username}`, `/pass:${password}`]);
+    await storeCredentialViaEnv(target, username, password);
+  }
+}
+
+// ─── RDP exit handler (shared between platforms) ──────────────────────────────
+
+function onRdpExit(connectionId, port) {
+  const entry = activeConnections.get(connectionId);
+  if (entry) entry.rdpOpen = false;
+  const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
+  if (cfAlive) {
+    safeSend("rdp-closed", { id: connectionId });
+    startRdpWatcher(connectionId, port);
+  } else {
+    activeConnections.delete(connectionId);
+    updateStatus(connectionId, "disconnected");
   }
 }
 
@@ -214,67 +315,72 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
   if (IS_WIN) {
     if (username && password) await storeCredential(port, username, password);
 
-    const mstsc = spawn("mstsc", [`/v:localhost:${port}`], { windowsHide: true, stdio: "ignore" });
-
+    const mstsc = spawn("mstsc", [`/v:localhost:${port}`], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
     const active = activeConnections.get(connectionId);
     if (active) {
       active.mstscProc = mstsc;
       active.rdpOpen = true;
     }
 
-    mstsc.on("exit", () => {
-      const entry = activeConnections.get(connectionId);
-      if (entry) entry.rdpOpen = false;
-      const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
-      if (cfAlive) {
-        safeSend("rdp-closed", { id: connectionId });
-        startRdpWatcher(connectionId, entry.connection.port);
-      } else {
-        activeConnections.delete(connectionId);
-        updateStatus(connectionId, "disconnected");
-      }
-    });
-
+    mstsc.on("exit", () => onRdpExit(connectionId, port));
     mstsc.on("error", () => {
       sendConnectionLog(
         connectionId,
         "Failed to launch mstsc. Ensure Remote Desktop is available on Windows.",
       );
     });
+  } else if (IS_MAC) {
+    let tmpPath;
+    try {
+      tmpPath = await writeTempRdpFile(connectionId, "localhost", port, username);
+    } catch (err) {
+      sendConnectionLog(connectionId, `Failed to write RDP file: ${err.message}`);
+      safeSend("rdp-closed", { id: connectionId });
+      return;
+    }
+    cleanupTempRdpFile(tmpPath, 8000);
+
+    // 'open' exits immediately after handing off to the RDP app.
+    // Use the watcher to track the actual session state.
+    const active = activeConnections.get(connectionId);
+    if (active) {
+      active.mstscProc = null;
+      active.rdpOpen = false;
+    }
+
+    const openProc = spawn("open", [tmpPath], { stdio: "ignore" });
+    openProc.on("exit", () => startRdpWatcher(connectionId, port));
+    openProc.on("error", () => {
+      sendConnectionLog(
+        connectionId,
+        "Failed to open RDP file. Install Microsoft Remote Desktop from the App Store (free).",
+      );
+      safeSend("rdp-closed", { id: connectionId });
+      fsP.unlink(tmpPath).catch(() => {});
+    });
   } else {
-    // Linux — use xfreerdp/xfreerdp3
+    // Linux
     const rdpBin = await findRdpBinary();
     if (!rdpBin) {
       sendConnectionLog(
         connectionId,
-        "No RDP client found. Install FreeRDP: sudo apt install freerdp2-x11  (or freerdp3-x11 on newer systems)",
+        "No RDP client found. Install FreeRDP: sudo apt install freerdp2-x11  (or freerdp3-x11)",
       );
       safeSend("rdp-closed", { id: connectionId });
       return;
     }
-
     const args = buildXfreeRdpArgs("localhost", port, username, password, rdpBin);
     const rdpProc = spawn(rdpBin, args, { stdio: "ignore" });
-
     const active = activeConnections.get(connectionId);
     if (active) {
       active.mstscProc = rdpProc;
       active.rdpOpen = true;
     }
 
-    rdpProc.on("exit", () => {
-      const entry = activeConnections.get(connectionId);
-      if (entry) entry.rdpOpen = false;
-      const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
-      if (cfAlive) {
-        safeSend("rdp-closed", { id: connectionId });
-        startRdpWatcher(connectionId, entry.connection.port);
-      } else {
-        activeConnections.delete(connectionId);
-        updateStatus(connectionId, "disconnected");
-      }
-    });
-
+    rdpProc.on("exit", () => onRdpExit(connectionId, port));
     rdpProc.on("error", () => {
       sendConnectionLog(
         connectionId,
@@ -287,12 +393,14 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
 // ─── RDP launch (direct, no tunnel) ──────────────────────────────────────────
 
 async function launchRemoteDesktopDirect(connection, password) {
-  if (IS_WIN && connection.username && password) {
-    await storeCredential(connection.port, connection.username, password);
+  const { id: connectionId, hostname, port, username } = connection;
+
+  if (IS_WIN && username && password) {
+    await storeCredential(port, username, password);
   }
 
-  updateStatus(connection.id, "connecting");
-  activeConnections.set(connection.id, {
+  updateStatus(connectionId, "connecting");
+  activeConnections.set(connectionId, {
     proc: null,
     connection,
     password,
@@ -300,57 +408,74 @@ async function launchRemoteDesktopDirect(connection, password) {
   });
 
   let rdpProc;
+
   if (IS_WIN) {
-    rdpProc = spawn("mstsc", [`/v:${connection.hostname}:${connection.port}`], {
+    rdpProc = spawn("mstsc", [`/v:${hostname}:${port}`], {
       windowsHide: true,
       stdio: "ignore",
     });
+  } else if (IS_MAC) {
+    let tmpPath;
+    try {
+      tmpPath = await writeTempRdpFile(connectionId, hostname, port, username);
+    } catch (err) {
+      sendConnectionLog(connectionId, `Failed to write RDP file: ${err.message}`);
+      activeConnections.delete(connectionId);
+      updateStatus(connectionId, "disconnected");
+      return;
+    }
+    cleanupTempRdpFile(tmpPath, 8000);
+
+    rdpProc = spawn("open", [tmpPath], { stdio: "ignore" });
+    rdpProc.on("error", () => {
+      sendConnectionLog(
+        connectionId,
+        "Failed to open RDP file. Install Microsoft Remote Desktop from the App Store (free).",
+      );
+    });
   } else {
+    // Linux
     const rdpBin = await findRdpBinary();
     if (!rdpBin) {
       sendConnectionLog(
-        connection.id,
-        "No RDP client found. Install FreeRDP: sudo apt install freerdp2-x11  (or freerdp3-x11)",
+        connectionId,
+        "No RDP client found. Install FreeRDP: sudo apt install freerdp2-x11",
       );
-      activeConnections.delete(connection.id);
-      updateStatus(connection.id, "disconnected");
+      activeConnections.delete(connectionId);
+      updateStatus(connectionId, "disconnected");
       return;
     }
-    const args = buildXfreeRdpArgs(
-      connection.hostname,
-      connection.port,
-      connection.username,
-      password,
+    rdpProc = spawn(
       rdpBin,
+      buildXfreeRdpArgs(hostname, port, username, password, rdpBin),
+      { stdio: "ignore" },
     );
-    rdpProc = spawn(rdpBin, args, { stdio: "ignore" });
   }
 
-  const active = activeConnections.get(connection.id);
+  const active = activeConnections.get(connectionId);
   if (active) active.mstscProc = rdpProc;
 
   rdpProc.on("exit", () => {
-    const entry = activeConnections.get(connection.id);
+    const entry = activeConnections.get(connectionId);
     if (entry) entry.mstscProc = null;
-    sendConnectionLog(connection.id, "RDP session closed.");
-    activeConnections.delete(connection.id);
-    updateStatus(connection.id, "disconnected");
+    sendConnectionLog(connectionId, "RDP session closed.");
+    activeConnections.delete(connectionId);
+    updateStatus(connectionId, "disconnected");
   });
 
   rdpProc.on("error", () => {
-    const client = IS_WIN ? "mstsc" : "xfreerdp";
-    sendConnectionLog(connection.id, `Failed to launch ${client}.`);
-    activeConnections.delete(connection.id);
-    updateStatus(connection.id, "disconnected");
+    const client = IS_WIN ? "mstsc" : IS_MAC ? "Microsoft Remote Desktop" : "xfreerdp";
+    sendConnectionLog(connectionId, `Failed to launch ${client}.`);
+    activeConnections.delete(connectionId);
+    updateStatus(connectionId, "disconnected");
   });
 
-  // Only mark connected if the process hasn't already exited (e.g. spawn error).
   if (rdpProc.exitCode === null) {
-    updateStatus(connection.id, "connected");
+    updateStatus(connectionId, "connected");
   }
 }
 
-// ─── SSH external client (fallback, not used for embedded terminal) ───────────
+// ─── SSH external client ──────────────────────────────────────────────────────
 
 async function launchSshClient(hostname, port, username, connectionId, sshKeyPath) {
   const target = username ? `${username}@${hostname}` : hostname;
@@ -378,7 +503,19 @@ async function launchSshClient(hostname, port, username, connectionId, sshKeyPat
         "Failed to open SSH. Install OpenSSH Client via Settings → Apps → Optional Features.",
       );
     });
+  } else if (IS_MAC) {
+    // Open Terminal.app with the SSH command via URL scheme (supported since macOS 10.14).
+    const sshUrl = `ssh://${username ? encodeURIComponent(username) + "@" : ""}${hostname}:${port}`;
+    try {
+      await shell.openExternal(sshUrl);
+    } catch {
+      // Fallback: use osascript to drive Terminal.app directly.
+      const sshCmd = `ssh ${sshArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")}`;
+      const script = `tell application "Terminal" to do script "${sshCmd.replace(/"/g, '\\"')}"\ntell application "Terminal" to activate`;
+      spawn("osascript", ["-e", script], { stdio: "ignore" });
+    }
   } else {
+    // Linux
     const term = await findLinuxTerminal();
     if (!term) {
       sendConnectionLog(
@@ -392,7 +529,7 @@ async function launchSshClient(hostname, port, username, connectionId, sshKeyPat
     proc.on("error", () => {
       sendConnectionLog(
         connectionId,
-        `Failed to open ${term}. Try installing xterm: sudo apt install xterm`,
+        `Failed to open ${term}. Try: sudo apt install xterm`,
       );
     });
   }
@@ -414,7 +551,23 @@ async function launchTelnetClient(hostname, port, connectionId) {
         "Failed to open Telnet. Enable Telnet Client in Windows Features.",
       );
     });
+  } else if (IS_MAC) {
+    // macOS Catalina+ removed telnet; suggest nc (netcat) as an alternative.
+    const telnetUrl = `telnet://${hostname}:${port}`;
+    try {
+      await shell.openExternal(telnetUrl);
+    } catch {
+      const script = `tell application "Terminal" to do script "telnet ${hostname} ${port}"\ntell application "Terminal" to activate`;
+      const proc = spawn("osascript", ["-e", script], { stdio: "ignore" });
+      proc.on("error", () => {
+        sendConnectionLog(
+          connectionId,
+          "Failed to open Telnet. Install telnet via Homebrew: brew install telnet",
+        );
+      });
+    }
   } else {
+    // Linux
     const term = await findLinuxTerminal();
     if (!term) {
       sendConnectionLog(
@@ -432,15 +585,30 @@ async function launchTelnetClient(hostname, port, connectionId) {
     proc.on("error", () => {
       sendConnectionLog(
         connectionId,
-        "Failed to open Telnet terminal. Install telnet and xterm: sudo apt install telnet xterm",
+        "Failed to open Telnet terminal. Install: sudo apt install telnet xterm",
       );
     });
   }
   sendConnectionLog(connectionId, `Telnet — connecting to ${hostname}:${port}`);
 }
 
+// ─── Cleanup on quit ─────────────────────────────────────────────────────────
+
+function deleteStoredCredential(port) {
+  if (!IS_WIN) return;
+  const { spawnSync } = require("child_process");
+  const targets = [`TERMSRV/localhost:${port}`];
+  if (port === 3389) targets.push("TERMSRV/localhost");
+  for (const target of targets) {
+    try {
+      spawnSync("cmdkey", [`/delete:${target}`], { windowsHide: true, stdio: "ignore" });
+    } catch {}
+  }
+}
+
 module.exports = {
   storeCredential,
+  deleteStoredCredential,
   launchRemoteDesktop,
   launchRemoteDesktopDirect,
   launchSshClient,

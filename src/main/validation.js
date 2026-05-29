@@ -44,6 +44,8 @@ function sanitizePath(value) {
   if (!s || s.length > 512) return "";
   // Reject null bytes and common shell injection characters.
   if (/[\x00<>|;&^`]/.test(s)) return "";
+  // Reject path traversal sequences to prevent reading arbitrary files.
+  if (/(^|[/\\])\.\.([/\\]|$)/.test(s)) return "";
   return s;
 }
 

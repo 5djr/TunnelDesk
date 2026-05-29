@@ -44,9 +44,7 @@ function checkForUpdate() {
             if (latest && compareVersions(latest, current) > 0) {
               resolve({
                 version: latest,
-                url:
-                  data.html_url ||
-                  `https://github.com/${REPO}/releases/latest`,
+                url: data.html_url || `https://github.com/${REPO}/releases/latest`,
               });
             } else {
               resolve(null);

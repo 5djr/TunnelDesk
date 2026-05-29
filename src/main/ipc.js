@@ -272,8 +272,19 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("save-settings", async (event, partial) => {
+    const prev = await readSettings();
     const result = await writeSettings(partial);
     safeSend("settings-did-change", result);
+    // Restart sync if the URL changed.
+    if (result.configSyncUrl !== prev.configSyncUrl) {
+      const { startSync, stopSync } = require("./sync");
+      const { getPolicy } = require("./policy");
+      const policy = getPolicy();
+      const syncUrl = policy.configSyncUrl || result.configSyncUrl;
+      const syncInterval = policy.syncInterval || result.configSyncInterval || 300;
+      if (syncUrl) startSync(syncUrl, syncInterval);
+      else stopSync();
+    }
     return result;
   });
 
@@ -304,6 +315,40 @@ function registerIpcHandlers() {
     const { createFormWindow } = require("./window");
     createFormWindow(connId || null);
     return { status: "opened" };
+  });
+
+  ipcMain.handle("open-qc-window", () => {
+    const { createQuickConnectWindow } = require("./window");
+    createQuickConnectWindow();
+    return { status: "opened" };
+  });
+
+  const pendingConfirms = new Map();
+
+  ipcMain.handle("open-confirm-window", (_event, { message }) => {
+    const { createConfirmWindow } = require("./window");
+    const win = createConfirmWindow(String(message).slice(0, 512));
+    return new Promise((resolve) => {
+      pendingConfirms.set(win.id, resolve);
+      win.once("closed", () => {
+        if (pendingConfirms.has(win.id)) {
+          pendingConfirms.get(win.id)(false);
+          pendingConfirms.delete(win.id);
+        }
+      });
+    });
+  });
+
+  ipcMain.handle("confirm-result", (event, result) => {
+    const { BrowserWindow } = require("electron");
+    const win = BrowserWindow.fromWebContents(event.sender);
+    if (win && pendingConfirms.has(win.id)) {
+      pendingConfirms.get(win.id)(!!result);
+      pendingConfirms.delete(win.id);
+    }
+    try {
+      win?.close();
+    } catch {}
   });
 
   ipcMain.handle("open-external", async (event, url) => {
@@ -610,6 +655,56 @@ function registerIpcHandlers() {
       await writeConnections(remaining);
       updateTrayMenu();
     }
+  });
+
+  // ─── Entra ID / MSAL auth ─────────────────────────────────────────────────
+
+  ipcMain.handle("auth-sign-in", async (_event, { clientId, tenantId }) => {
+    const { signIn } = require("./auth");
+    return signIn(String(clientId || "").trim(), String(tenantId || "common").trim());
+  });
+
+  ipcMain.handle("auth-sign-out", async () => {
+    const { signOut } = require("./auth");
+    return signOut();
+  });
+
+  ipcMain.handle("auth-get-status", async () => {
+    const { getAuthStatus } = require("./auth");
+    const settings = await readSettings();
+    const { getPolicy } = require("./policy");
+    const policy = getPolicy();
+    const clientId = policy.clientId || settings.entraClientId || "";
+    const tenantId = policy.tenantId || settings.entraTenantId || "common";
+    return getAuthStatus(clientId, tenantId);
+  });
+
+  // ─── Config sync ─────────────────────────────────────────────────────────
+
+  ipcMain.handle("sync-fetch-now", async () => {
+    const { fetchAndApply } = require("./sync");
+    const { getPolicy } = require("./policy");
+    const settings = await readSettings();
+    const policy = getPolicy();
+    const url = policy.configSyncUrl || settings.configSyncUrl || "";
+    if (!url) throw new Error("No sync URL configured");
+    const result = await fetchAndApply(url);
+    return { count: result.connections.length };
+  });
+
+  ipcMain.handle("get-managed-connections", () => {
+    const { getManagedConnections } = require("./sync");
+    return getManagedConnections();
+  });
+
+  ipcMain.handle("get-sync-status", () => {
+    const { getSyncStatus } = require("./sync");
+    return getSyncStatus();
+  });
+
+  ipcMain.handle("get-policy", () => {
+    const { getPolicy } = require("./policy");
+    return getPolicy();
   });
 }
 
