@@ -385,6 +385,10 @@ function sshResize(sid, cols, rows) {
   }
 }
 
+// Pending destroy timers — tracked so they can be cancelled if the session
+// is already cleaned up before the 5-second grace period expires.
+const _destroyTimers = new Map();
+
 function sshCloseSession(sid) {
   const s = sessions.get(sid);
   if (!s) return;
@@ -395,11 +399,13 @@ function sshCloseSession(sid) {
   try {
     s.client.end();
   } catch {}
-  setTimeout(() => {
+  const t = setTimeout(() => {
+    _destroyTimers.delete(sid);
     try {
       s.client.destroy();
     } catch {}
   }, 5000);
+  _destroyTimers.set(sid, t);
 }
 
 // ─── SFTP operations ──────────────────────────────────────────────────────────
@@ -511,6 +517,10 @@ function closeSessionsForConnection(connectionId) {
   for (const [sid, s] of sessions.entries()) {
     if (s.connectionId !== connectionId) continue;
     sessions.delete(sid);
+    if (_destroyTimers.has(sid)) {
+      clearTimeout(_destroyTimers.get(sid));
+      _destroyTimers.delete(sid);
+    }
     try {
       if (s.stream) s.stream.end();
     } catch {}
@@ -519,11 +529,13 @@ function closeSessionsForConnection(connectionId) {
     } catch {}
     // Force-destroy after 5s in case client.end() hangs on an unresponsive server.
     const client = s.client;
-    setTimeout(() => {
+    const t = setTimeout(() => {
+      _destroyTimers.delete(sid);
       try {
         client.destroy();
       } catch {}
     }, 5000);
+    _destroyTimers.set(sid, t);
   }
 }
 

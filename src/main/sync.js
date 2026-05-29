@@ -1,7 +1,6 @@
 "use strict";
 
 const https = require("https");
-const http = require("http");
 const fs = require("fs").promises;
 const path = require("path");
 const { state } = require("./state");
@@ -69,10 +68,10 @@ function fetchUrl(url) {
     } catch {
       return reject(new Error("Invalid sync URL"));
     }
-    if (target.protocol !== "https:" && target.protocol !== "http:") {
-      return reject(new Error("Sync URL must start with https://"));
+    if (target.protocol !== "https:") {
+      return reject(new Error("Sync URL must use HTTPS"));
     }
-    const mod = target.protocol === "https:" ? https : http;
+    const mod = https;
     const chunks = [];
     let size = 0;
     const req = mod.request(

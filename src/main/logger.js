@@ -10,6 +10,11 @@ let writeStream = null;
 let currentSize = 0;
 let ready = false;
 
+// Buffered writes — accumulate log lines and flush them as a single encrypted
+// block every 500 ms instead of calling safeStorage.encryptString per line.
+let _writeBuf = [];
+let _flushTimer = null;
+
 function logFilePath(n = 0) {
   const base = path.join(state.userDataPath, "activity.log");
   return n === 0 ? base : `${base}.${n}`;
@@ -54,16 +59,25 @@ function initLogger() {
   openWriteStream();
 }
 
-function writeLog(id, message) {
-  if (!writeStream) return;
-  const plain = `${new Date().toISOString()}\t${id || ""}\t${message}`;
-  // Each log entry is encrypted individually so the append stream is preserved.
-  const line = encryptFile(plain) + "\n";
+function flushLog() {
+  _flushTimer = null;
+  if (!writeStream || _writeBuf.length === 0) return;
+  const lines = _writeBuf.splice(0);
+  // Encrypt the batch as a single block — one safeStorage call for many lines.
+  const block = encryptFile(lines.join("\n")) + "\n";
   try {
-    writeStream.write(line);
-    currentSize += Buffer.byteLength(line, "utf8");
+    writeStream.write(block);
+    currentSize += Buffer.byteLength(block, "utf8");
     if (currentSize >= MAX_BYTES) rotateSync();
   } catch {}
+}
+
+function writeLog(id, message) {
+  if (!writeStream) return;
+  _writeBuf.push(`${new Date().toISOString()}\t${id || ""}\t${message}`);
+  if (!_flushTimer) {
+    _flushTimer = setTimeout(flushLog, 500);
+  }
 }
 
 function getLogFilePath() {
@@ -71,6 +85,11 @@ function getLogFilePath() {
 }
 
 function closeLogger() {
+  if (_flushTimer) {
+    clearTimeout(_flushTimer);
+    _flushTimer = null;
+  }
+  flushLog(); // flush any pending entries before closing
   if (writeStream) {
     try {
       writeStream.end();

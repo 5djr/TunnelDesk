@@ -8,14 +8,24 @@ function configPath() {
   return path.join(state.userDataPath, "connections.json");
 }
 
+// In-memory cache — avoids disk read + DPAPI decryption on every IPC call.
+// Invalidated by writeConnections so callers always see the latest data.
+let _cache = null;
+
 async function readConnections() {
+  if (_cache !== null) return _cache.slice();
   try {
     const raw = await fs.readFile(configPath(), "utf8");
     const json = decryptFile(raw);
-    if (json === null) return []; // decryption failed (wrong machine / corrupted)
+    if (json === null) {
+      _cache = [];
+      return [];
+    }
     const parsed = JSON.parse(json);
-    return Array.isArray(parsed) ? parsed : [];
+    _cache = Array.isArray(parsed) ? parsed : [];
+    return _cache.slice();
   } catch {
+    _cache = [];
     return [];
   }
 }
@@ -27,6 +37,7 @@ async function writeConnections(connections) {
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await fs.writeFile(tmp, encryptFile(JSON.stringify(connections, null, 2)), "utf8");
   await fs.rename(tmp, file);
+  _cache = connections;
 }
 
 // One-time migration: convert any plain-text passwords to encrypted storage.

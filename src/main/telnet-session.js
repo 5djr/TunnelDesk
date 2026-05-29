@@ -96,13 +96,17 @@ function parseTelnet(session, raw) {
     } else if (cmd === SB) {
       // Collect subnegotiation bytes until IAC SE
       const start = i;
+      let foundSe = false;
       while (i < raw.length) {
         if (raw[i] === IAC && i + 1 < raw.length && raw[i + 1] === SE) {
+          foundSe = true;
           i += 2;
           break;
         }
         i++;
       }
+      // If IAC SE was not found, the buffer ended mid-subnegotiation — skip.
+      if (!foundSe) break;
       const sub = raw.slice(start, i - 2);
       // Terminal-type subnegotiation: server sends SEND, we reply IS xterm-256color
       if (sub.length >= 2 && sub[0] === OPT_TTYPE && sub[1] === TTYPE_SEND) {
@@ -184,6 +188,13 @@ function telnetWrite(sid, data) {
   if (!s) return;
   // data from xterm onData is a string where each char is a raw byte (binary/latin1)
   const buf = Buffer.from(data, "binary");
+  // Fast path: 0xFF (IAC) is not present in normal typing — skip the allocation.
+  if (!buf.includes(0xff)) {
+    try {
+      s.socket.write(buf);
+    } catch {}
+    return;
+  }
   const escaped = [];
   for (const b of buf) {
     escaped.push(b);

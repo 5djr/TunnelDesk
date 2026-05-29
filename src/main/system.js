@@ -123,12 +123,24 @@ function getProcessMemoryBytesDarwin(pid) {
   });
 }
 
-function getProcessMemoryBytes(pid) {
-  if (!pid) return Promise.resolve(null);
-  if (IS_WIN) return getProcessMemoryBytesWindows(pid);
-  if (IS_MAC) return getProcessMemoryBytesDarwin(pid);
-  if (IS_LINUX) return getProcessMemoryBytesLinux(pid);
-  return Promise.resolve(null);
+// Cache per-PID memory readings for 4 s — the debug panel polls every 2 s and
+// spawning tasklist/ps on every tick is expensive with no meaningful gain.
+const _memCache = new Map(); // pid → { bytes, ts }
+const MEM_CACHE_TTL = 4000;
+
+async function getProcessMemoryBytes(pid) {
+  if (!pid) return null;
+  const cached = _memCache.get(pid);
+  if (cached && Date.now() - cached.ts < MEM_CACHE_TTL) return cached.bytes;
+
+  let bytes;
+  if (IS_WIN) bytes = await getProcessMemoryBytesWindows(pid);
+  else if (IS_MAC) bytes = await getProcessMemoryBytesDarwin(pid);
+  else if (IS_LINUX) bytes = await getProcessMemoryBytesLinux(pid);
+  else bytes = null;
+
+  _memCache.set(pid, { bytes, ts: Date.now() });
+  return bytes;
 }
 
 // ─── cloudflared version ──────────────────────────────────────────────────────

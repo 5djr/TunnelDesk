@@ -53,6 +53,28 @@ const { readSettings, writeSettings } = require("./settings");
 const { getLogFilePath } = require("./logger");
 const { updateTrayMenu } = require("./tray");
 
+// Cache network interfaces — they change rarely and os.networkInterfaces() is
+// called on every debug-stats poll (every 2 s while a connection is open).
+let _netIfsCache = null;
+let _netIfsCachedAt = 0;
+const NET_IFS_TTL = 30000;
+
+function getCachedNetworkInterfaces() {
+  const now = Date.now();
+  if (_netIfsCache && now - _netIfsCachedAt < NET_IFS_TTL) return _netIfsCache;
+  _netIfsCache = os.networkInterfaces();
+  _netIfsCachedAt = now;
+  return _netIfsCache;
+}
+
+// Coerce IPC-supplied identifiers to a bounded string.
+// Prevents null/object/array inputs from bypassing Map lookups or causing
+// unexpected behaviour in downstream string operations.
+function toId(value, maxLen = 256) {
+  if (value == null) return "";
+  return String(value).slice(0, maxLen);
+}
+
 function registerIpcHandlers() {
   ipcMain.handle("load-connections", async () => {
     const connections = await readConnections();
@@ -70,7 +92,10 @@ function registerIpcHandlers() {
 
     let encryptedPassword;
     if (connection.password) {
-      encryptedPassword = encryptPassword(String(connection.password).slice(0, 256));
+      if (String(connection.password).length > 1024) {
+        throw new Error("Password must be 1024 characters or fewer");
+      }
+      encryptedPassword = encryptPassword(String(connection.password));
     } else if (
       connection.keepExistingPassword &&
       existing &&
@@ -83,9 +108,10 @@ function registerIpcHandlers() {
 
     let encryptedSshKeyPassphrase;
     if (connection.sshKeyPassphrase) {
-      encryptedSshKeyPassphrase = encryptPassword(
-        String(connection.sshKeyPassphrase).slice(0, 256),
-      );
+      if (String(connection.sshKeyPassphrase).length > 1024) {
+        throw new Error("SSH key passphrase must be 1024 characters or fewer");
+      }
+      encryptedSshKeyPassphrase = encryptPassword(String(connection.sshKeyPassphrase));
     } else if (
       connection.keepExistingSshKeyPassphrase &&
       existing &&
@@ -131,23 +157,25 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("delete-connection", async (event, connectionId) => {
+    const id = toId(connectionId);
     const connections = await readConnections();
-    const remaining = connections.filter((item) => item.id !== connectionId);
+    const remaining = connections.filter((item) => item.id !== id);
     await writeConnections(remaining);
-    await stopConnection(connectionId);
+    await stopConnection(id);
     updateTrayMenu();
     return remaining.map(sanitizeForRenderer);
   });
 
   ipcMain.handle("connect", async (event, connectionId) => {
+    const id = toId(connectionId);
     try {
-      const result = await connectById(connectionId);
+      const result = await connectById(id);
       updateTrayMenu();
       return result;
     } catch (error) {
-      updateStatus(connectionId, "disconnected");
+      updateStatus(id, "disconnected");
       sendConnectionLog(
-        connectionId,
+        id,
         (error instanceof Error ? error.message : String(error)) || "Connection failed",
       );
       updateTrayMenu();
@@ -156,20 +184,21 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("disconnect", async (event, connectionId) => {
-    const result = await disconnectById(connectionId);
+    const result = await disconnectById(toId(connectionId));
     updateTrayMenu();
     return result;
   });
 
   ipcMain.handle("launch-rdp", async (event, connectionId) => {
     const { launchRemoteDesktop } = require("./rdp");
-    const active = activeConnections.get(connectionId);
+    const id = toId(connectionId);
+    const active = activeConnections.get(id);
     if (!active || !isProcessAlive(active.proc)) {
       throw new Error("Cloudflare tunnel is not active — connect first");
     }
     await launchRemoteDesktop(
       active.connection.port,
-      connectionId,
+      id,
       active.connection.username,
       active.password,
     );
@@ -187,7 +216,7 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("get-tunnel-stats", async (event, connectionId) => {
-    const active = activeConnections.get(connectionId);
+    const active = activeConnections.get(toId(connectionId));
     if (!active) return null;
 
     const { proc, connection, connectedAt } = active;
@@ -232,10 +261,11 @@ function registerIpcHandlers() {
           )
         : null;
 
-    const localIps = Object.entries(os.networkInterfaces()).flatMap(([name, addrs]) =>
-      (addrs || [])
-        .filter((a) => !a.internal && a.family === "IPv4")
-        .map((a) => ({ name, address: a.address })),
+    const localIps = Object.entries(getCachedNetworkInterfaces()).flatMap(
+      ([name, addrs]) =>
+        (addrs || [])
+          .filter((a) => !a.internal && a.family === "IPv4")
+          .map((a) => ({ name, address: a.address })),
     );
 
     return {
@@ -367,19 +397,20 @@ function registerIpcHandlers() {
   // main window shows the correct connected / disconnected status.
 
   ipcMain.handle("ssh-report-status", (_event, { connId, ok }) => {
+    const id = toId(connId);
     if (ok) {
-      const entry = activeConnections.get(connId);
+      const entry = activeConnections.get(id);
       // Guard: only accept the first success report — a stale sshReportStatus(true)
       // from an old terminal window must not stamp a freshly-reconnecting session.
       if (entry && entry.connectedAt === null) {
         entry.connectedAt = Date.now();
-        updateStatus(connId, "connected");
+        updateStatus(id, "connected");
       }
     } else {
-      const wasConnected = connectionStatuses.get(connId) === "connected";
-      activeConnections.delete(connId);
-      updateStatus(connId, "disconnected");
-      if (!wasConnected) sendConnectionLog(connId, "Connection failed.");
+      const wasConnected = connectionStatuses.get(id) === "connected";
+      activeConnections.delete(id);
+      updateStatus(id, "disconnected");
+      if (!wasConnected) sendConnectionLog(id, "Connection failed.");
     }
   });
 
@@ -391,7 +422,7 @@ function registerIpcHandlers() {
 
   ipcMain.handle("telnet-term-create", async (_event, connectionId) => {
     return telnetCreateTerm(
-      connectionId,
+      toId(connectionId),
       (id, data) =>
         safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
       (id) => safeSend("ssh-close", { sid: id, code: null, signal: null }),
@@ -399,22 +430,22 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("telnet-write", (_event, { sid, data }) => {
-    telnetWrite(sid, data);
+    telnetWrite(toId(sid), data);
   });
 
   ipcMain.handle("telnet-resize", (_event, { sid, cols, rows }) => {
-    telnetResize(sid, cols, rows);
+    telnetResize(toId(sid), cols, rows);
   });
 
   ipcMain.handle("telnet-close-session", (_event, sid) => {
-    telnetCloseSession(sid);
+    telnetCloseSession(toId(sid));
   });
 
   // ─── SSH terminal ──────────────────────────────────────────────────────────
 
   ipcMain.handle("ssh-term-create", async (_event, connectionId) => {
     const sid = await sshCreateTerm(
-      connectionId,
+      toId(connectionId),
       (id, data) =>
         safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
       (id, code, signal) => safeSend("ssh-close", { sid: id, code, signal }),
@@ -424,35 +455,35 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("ssh-sftp-create", async (_event, connectionId) => {
-    return sshCreateSftp(connectionId, (id) =>
+    return sshCreateSftp(toId(connectionId), (id) =>
       safeSend("ssh-close", { sid: id, code: null, signal: null }),
     );
   });
 
   ipcMain.handle("ssh-write", (_event, { sid, data }) => {
-    sshWrite(sid, data);
+    sshWrite(toId(sid), data);
   });
 
   ipcMain.handle("ssh-resize", (_event, { sid, cols, rows }) => {
-    sshResize(sid, cols, rows);
+    sshResize(toId(sid), cols, rows);
   });
 
   ipcMain.handle("ssh-close-session", (_event, sid) => {
-    sshCloseSession(sid);
+    sshCloseSession(toId(sid));
   });
 
   ipcMain.handle("cancel-ssh-connect", (_event, connectionId) => {
-    cancelPendingConnections(connectionId);
+    cancelPendingConnections(toId(connectionId));
   });
 
   // ─── SFTP operations ───────────────────────────────────────────────────────
 
   ipcMain.handle("sftp-list", (_event, { sid, remotePath }) => {
-    return sftpList(sid, remotePath);
+    return sftpList(toId(sid), remotePath);
   });
 
   ipcMain.handle("sftp-home", (_event, sid) => {
-    return sftpHome(sid);
+    return sftpHome(toId(sid));
   });
 
   ipcMain.handle("sftp-download", async (event, { sid, remotePath }) => {
@@ -465,7 +496,7 @@ function registerIpcHandlers() {
       : filename;
     const result = await dialog.showSaveDialog(win, { title: "Save File", defaultPath });
     if (result.canceled) return { canceled: true };
-    await sftpDownload(sid, remotePath, result.filePath);
+    await sftpDownload(toId(sid), remotePath, result.filePath);
     return { filePath: result.filePath };
   });
 
@@ -543,20 +574,20 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle("sftp-delete", (_event, { sid, remotePath, isDir }) => {
-    return sftpDelete(sid, remotePath, isDir);
+    return sftpDelete(toId(sid), remotePath, !!isDir);
   });
 
   ipcMain.handle("sftp-rename", (_event, { sid, oldPath, newPath }) => {
-    return sftpRename(sid, oldPath, newPath);
+    return sftpRename(toId(sid), oldPath, newPath);
   });
 
   ipcMain.handle("sftp-mkdir", (_event, { sid, remotePath }) => {
-    return sftpMkdir(sid, remotePath);
+    return sftpMkdir(toId(sid), remotePath);
   });
 
   // Direct upload from a known local path (used by drag-and-drop).
   ipcMain.handle("sftp-upload-path", async (_event, { sid, localPath, remotePath }) => {
-    await sftpUpload(sid, localPath, remotePath);
+    await sftpUpload(toId(sid), localPath, remotePath);
     return { dest: remotePath };
   });
 
@@ -571,7 +602,7 @@ function registerIpcHandlers() {
     const localPath = result.filePaths[0];
     const filename = path.basename(localPath);
     const dest = remotePath.replace(/\/?$/, "/") + filename;
-    await sftpUpload(sid, localPath, dest);
+    await sftpUpload(toId(sid), localPath, dest);
     return { dest };
   });
 

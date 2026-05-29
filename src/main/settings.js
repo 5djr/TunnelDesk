@@ -37,14 +37,24 @@ function settingsPath() {
   return path.join(state.userDataPath, "settings.json");
 }
 
+// In-memory cache — avoids disk read + DPAPI decryption on every IPC call.
+// Invalidated by writeSettings so callers always see the latest data.
+let _cache = null;
+
 async function readSettings() {
+  if (_cache !== null) return _cache;
   try {
     const raw = await fs.readFile(settingsPath(), "utf8");
     const json = decryptFile(raw);
-    if (json === null) return { ...DEFAULTS }; // decryption failed
-    return { ...DEFAULTS, ...JSON.parse(json) };
+    if (json === null) {
+      _cache = { ...DEFAULTS };
+      return _cache;
+    }
+    _cache = { ...DEFAULTS, ...JSON.parse(json) };
+    return _cache;
   } catch {
-    return { ...DEFAULTS };
+    _cache = { ...DEFAULTS };
+    return _cache;
   }
 }
 
@@ -139,6 +149,7 @@ async function writeSettings(partial) {
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
   await fs.writeFile(tmp, encryptFile(JSON.stringify(merged, null, 2)), "utf8");
   await fs.rename(tmp, file);
+  _cache = merged;
   return merged;
 }
 

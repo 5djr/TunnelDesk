@@ -90,14 +90,30 @@ function getPolicy() {
   return cached;
 }
 
+function policyChanged(a, b) {
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return true;
+  for (const k of ka) {
+    const av = a[k];
+    const bv = b[k];
+    if (Array.isArray(av) && Array.isArray(bv)) {
+      if (av.length !== bv.length || av.some((v, i) => v !== bv[i])) return true;
+    } else if (av !== bv) {
+      return true;
+    }
+  }
+  return false;
+}
+
 function startPolicyPolling(intervalMs, onChange) {
   cached = readPolicy();
   onChange(cached);
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
-    const prev = JSON.stringify(cached);
+    const prev = cached;
     readPolicy();
-    if (JSON.stringify(cached) !== prev) onChange(cached);
+    if (policyChanged(cached, prev)) onChange(cached);
   }, intervalMs);
 }
 

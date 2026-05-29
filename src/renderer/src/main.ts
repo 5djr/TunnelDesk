@@ -934,9 +934,12 @@ wireRevealBtn("toggle-passphrase", sshKeyPassphraseInput);
 
 // ─── Log ──────────────────────────────────────────────────────────────────────
 
+let logEntryCount = 0;
+
 function appendLog(message: string) {
-  const emptyEl = activityLog.querySelector(".log-empty");
-  if (emptyEl) emptyEl.remove();
+  if (activityLog.firstElementChild?.classList.contains("log-empty")) {
+    activityLog.firstElementChild.remove();
+  }
 
   const entry = document.createElement("div");
   entry.className = "log-entry";
@@ -954,13 +957,17 @@ function appendLog(message: string) {
   msgSpan.textContent = message;
   entry.append(timeSpan, msgSpan);
   activityLog.appendChild(entry);
-  const allEntries = activityLog.querySelectorAll(".log-entry");
-  if (allEntries.length > 500) allEntries[0].remove();
+  logEntryCount++;
+  if (logEntryCount > 500) {
+    activityLog.firstElementChild?.remove();
+    logEntryCount--;
+  }
   activityLog.scrollTop = activityLog.scrollHeight;
 }
 
 logClearBtn.addEventListener("click", () => {
   activityLog.innerHTML = '<div class="log-empty">No activity yet.</div>';
+  logEntryCount = 0;
 });
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -4028,6 +4035,9 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW && !IS_QC_WINDOW && !IS_CONFIRM_WINDO
   ) as HTMLButtonElement;
 
   window.api.onUpdateAvailable(({ version, url }) => {
+    // Validate protocol before touching the DOM — prevents a javascript: href
+    // from being navigated via keyboard/middle-click if main process is compromised.
+    if (typeof url !== "string" || !url.startsWith("https://")) return;
     updateBannerText.textContent = `TunnelDesk v${version} is available —`;
     updateBannerLink.href = url;
     updateBannerLink.addEventListener("click", (e) => {
@@ -4222,7 +4232,8 @@ function escapeHtml(str: string): string {
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function errorMsg(err: unknown, fallback: string): string {
