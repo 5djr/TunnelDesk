@@ -5,7 +5,8 @@
     "moduleResolution": "bundler",
     "strict": true,
     "lib": ["ES2022", "DOM"],
-    "skipLibCheck": true
+    "skipLibCheck": true,
+    "allowArbitraryExtensions": true
   },
   "include": ["src/renderer/src/**/*", "vite.config.ts"]
 }
