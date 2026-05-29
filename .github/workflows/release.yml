@@ -20,11 +20,15 @@ jobs:
           node-version: "20"
           cache: "npm"
 
-      # cpu-features is an optional native addon inside ssh2. Skip it so the
-      # Electron V8 native rebuild does not fail in CI. ssh2 falls back to
-      # pure-JS crypto detection when cpu-features is absent.
       - name: Install dependencies
-        run: npm ci --ignore-optional
+        run: npm ci
+
+      # cpu-features is an optionalDependency of ssh2 whose nan bindings are
+      # incompatible with Electron 42's V8. Deleting it before electron-builder
+      # runs prevents the native rebuild failure. ssh2 falls back to pure JS.
+      - name: Remove cpu-features (incompatible with Electron 42 V8)
+        run: Remove-Item -Recurse -Force node_modules/cpu-features -ErrorAction SilentlyContinue
+        shell: pwsh
 
       - name: Build renderer
         run: npm run build:renderer
@@ -55,7 +59,10 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci --ignore-optional
+        run: npm ci
+
+      - name: Remove cpu-features (incompatible with Electron 42 V8)
+        run: rm -rf node_modules/cpu-features || true
 
       - name: Install Linux build tools
         run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg
@@ -89,7 +96,10 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm ci --ignore-optional
+        run: npm ci
+
+      - name: Remove cpu-features (incompatible with Electron 42 V8)
+        run: rm -rf node_modules/cpu-features || true
 
       - name: Build renderer
         run: npm run build:renderer
