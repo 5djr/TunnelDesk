@@ -57,11 +57,11 @@ TunnelDesk is a desktop application that lets you manage Cloudflare Access tunne
 
 ## Platform support
 
-| Platform | Installer formats | Architecture |
-|----------|------------------|-------------|
-| Windows 10 / 11 | MSI, portable EXE | x64 |
-| Linux (Ubuntu 20.04+, Debian, Fedora, etc.) | AppImage, .deb | x64, arm64 |
-| macOS 12+ (Monterey) | DMG, ZIP | x64 (Intel), arm64 (Apple Silicon) |
+| Platform                                    | Installer formats | Architecture                       |
+| ------------------------------------------- | ----------------- | ---------------------------------- |
+| Windows 10 / 11                             | MSI, portable EXE | x64                                |
+| Linux (Ubuntu 20.04+, Debian, Fedora, etc.) | AppImage, .deb    | x64, arm64                         |
+| macOS 12+ (Monterey)                        | DMG, ZIP          | x64 (Intel), arm64 (Apple Silicon) |
 
 ---
 
@@ -97,14 +97,14 @@ TunnelDesk is a desktop application that lets you manage Cloudflare Access tunne
 3. Run the installer.
 4. On first launch, install `cloudflared` and optionally set its path in Settings if it isn't on `PATH`.
 
-| Platform | File | Notes |
-|----------|------|-------|
-| Windows | `TunnelDesk-x.x.x.msi` | Standard installer, no admin required (per-user) |
-| Windows | `TunnelDesk-x.x.x.exe` | Portable, no install needed |
-| Linux x64 | `TunnelDesk-x.x.x.AppImage` | `chmod +x` then run |
-| Linux x64 | `tunneldesk_x.x.x_amd64.deb` | `sudo dpkg -i` |
-| macOS Intel | `TunnelDesk-x.x.x.dmg` | Drag to Applications |
-| macOS Apple Silicon | `TunnelDesk-x.x.x-arm64.dmg` | Drag to Applications |
+| Platform            | File                         | Notes                                            |
+| ------------------- | ---------------------------- | ------------------------------------------------ |
+| Windows             | `TunnelDesk-x.x.x.msi`       | Standard installer, no admin required (per-user) |
+| Windows             | `TunnelDesk-x.x.x.exe`       | Portable, no install needed                      |
+| Linux x64           | `TunnelDesk-x.x.x.AppImage`  | `chmod +x` then run                              |
+| Linux x64           | `tunneldesk_x.x.x_amd64.deb` | `sudo dpkg -i`                                   |
+| macOS Intel         | `TunnelDesk-x.x.x.dmg`       | Drag to Applications                             |
+| macOS Apple Silicon | `TunnelDesk-x.x.x-arm64.dmg` | Drag to Applications                             |
 
 **macOS note:** Because the build is unsigned for community releases, you may need to right-click → Open the first time to bypass Gatekeeper.
 
@@ -133,27 +133,29 @@ Enter these values in TunnelDesk under **Settings → Account**.
 ### Group Policy
 
 **Windows** — registry path:
+
 ```
 HKEY_LOCAL_MACHINE\SOFTWARE\Policies\TunnelDesk
 ```
 
 **Linux** — file path:
+
 ```
 /etc/tunneldesk/policy.json
 ```
 
 **Supported keys:**
 
-| Key | Windows type | Description |
-|-----|-------------|-------------|
-| `ConfigSyncUrl` | `REG_SZ` | HTTPS URL for org config sync endpoint |
-| `SyncInterval` | `REG_DWORD` | Sync poll interval in seconds (min 60) |
-| `TenantId` | `REG_SZ` | Entra ID tenant ID (locks the field in Settings) |
-| `ClientId` | `REG_SZ` | Entra ID client ID (locks the field in Settings) |
-| `EnforceSSO` | `REG_DWORD` | 1 = require sign-in |
-| `DisableManualConnections` | `REG_DWORD` | 1 = prevent adding personal connections |
-| `BannerMessage` | `REG_SZ` | Text shown in the policy banner at the top of the app |
-| `AllowedProtocols` | `REG_SZ` | Comma-separated list of allowed protocol identifiers |
+| Key                        | Windows type | Description                                           |
+| -------------------------- | ------------ | ----------------------------------------------------- |
+| `ConfigSyncUrl`            | `REG_SZ`     | HTTPS URL for org config sync endpoint                |
+| `SyncInterval`             | `REG_DWORD`  | Sync poll interval in seconds (min 60)                |
+| `TenantId`                 | `REG_SZ`     | Entra ID tenant ID (locks the field in Settings)      |
+| `ClientId`                 | `REG_SZ`     | Entra ID client ID (locks the field in Settings)      |
+| `EnforceSSO`               | `REG_DWORD`  | 1 = require sign-in                                   |
+| `DisableManualConnections` | `REG_DWORD`  | 1 = prevent adding personal connections               |
+| `BannerMessage`            | `REG_SZ`     | Text shown in the policy banner at the top of the app |
+| `AllowedProtocols`         | `REG_SZ`     | Comma-separated list of allowed protocol identifiers  |
 
 Policy values lock the corresponding UI fields and show a lock indicator.
 
@@ -246,15 +248,15 @@ Cross-platform packaging (e.g. building macOS DMG from Windows) is not supported
 
 ## Third-party software
 
-| Package | License |
-|---------|---------|
-| [Electron](https://www.electronjs.org/) | MIT |
-| [Vite](https://vitejs.dev/) | MIT |
-| [TypeScript](https://www.typescriptlang.org/) | Apache 2.0 |
-| [xterm.js](https://xtermjs.org/) | MIT |
-| [ssh2](https://github.com/mscdex/ssh2) | MIT |
-| [@azure/msal-node](https://github.com/AzureAD/microsoft-authentication-library-for-js) | MIT |
-| [electron-builder](https://www.electron.build/) | MIT |
+| Package                                                                                | License    |
+| -------------------------------------------------------------------------------------- | ---------- |
+| [Electron](https://www.electronjs.org/)                                                | MIT        |
+| [Vite](https://vitejs.dev/)                                                            | MIT        |
+| [TypeScript](https://www.typescriptlang.org/)                                          | Apache 2.0 |
+| [xterm.js](https://xtermjs.org/)                                                       | MIT        |
+| [ssh2](https://github.com/mscdex/ssh2)                                                 | MIT        |
+| [@azure/msal-node](https://github.com/AzureAD/microsoft-authentication-library-for-js) | MIT        |
+| [electron-builder](https://www.electron.build/)                                        | MIT        |
 
 TunnelDesk launches `cloudflared` as an external process. `cloudflared` is developed by Cloudflare, Inc. and is subject to its own [license](https://github.com/cloudflare/cloudflared/blob/master/LICENSE). TunnelDesk does not bundle or redistribute `cloudflared`.
 
