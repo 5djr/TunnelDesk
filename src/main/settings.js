@@ -82,7 +82,10 @@ async function writeSettings(partial) {
     safe.autoReconnect = partial.autoReconnect;
   }
   if (typeof partial.autoReconnectAttempts === "number") {
-    safe.autoReconnectAttempts = Math.max(1, Math.min(10, Math.floor(partial.autoReconnectAttempts)));
+    safe.autoReconnectAttempts = Math.max(
+      1,
+      Math.min(10, Math.floor(partial.autoReconnectAttempts)),
+    );
   }
   const merged = { ...current, ...safe };
   const file = settingsPath();

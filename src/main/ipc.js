@@ -470,7 +470,9 @@ function registerIpcHandlers() {
           : `${Date.now()}-${Math.random().toString(16).slice(2)}`;
       existing.push({
         id,
-        friendlyName: String(conn.friendlyName || hostname).trim().slice(0, 128),
+        friendlyName: String(conn.friendlyName || hostname)
+          .trim()
+          .slice(0, 128),
         hostname,
         port: normalizePort(conn.port || 3389),
         username: sanitizeUsername(conn.username),
@@ -545,14 +547,25 @@ function registerIpcHandlers() {
     return new Promise((resolve) => {
       const start = Date.now();
       const req = mod.request(
-        { hostname: parsed.hostname, port: parsed.port || undefined, path: parsed.pathname || "/", method: "HEAD", timeout: 8000 },
+        {
+          hostname: parsed.hostname,
+          port: parsed.port || undefined,
+          path: parsed.pathname || "/",
+          method: "HEAD",
+          timeout: 8000,
+        },
         (res) => {
           res.resume();
           resolve({ statusCode: res.statusCode, timeMs: Date.now() - start });
         },
       );
-      req.on("timeout", () => { req.destroy(); resolve({ statusCode: null, timeMs: Date.now() - start, error: "Timeout" }); });
-      req.on("error", (e) => resolve({ statusCode: null, timeMs: Date.now() - start, error: e.message }));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve({ statusCode: null, timeMs: Date.now() - start, error: "Timeout" });
+      });
+      req.on("error", (e) =>
+        resolve({ statusCode: null, timeMs: Date.now() - start, error: e.message }),
+      );
       req.end();
     });
   });

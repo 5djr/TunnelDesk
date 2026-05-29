@@ -2293,7 +2293,9 @@ body.form-window-mode .modal-close {
   opacity: 0;
   font-size: 13px;
   line-height: 1;
-  transition: color 0.12s, opacity 0.12s;
+  transition:
+    color 0.12s,
+    opacity 0.12s;
 }
 
 .tunnel-item:hover .pin-btn,
@@ -2393,7 +2395,9 @@ body.form-window-mode .modal-close {
   opacity: 0;
   font-size: 13px;
   line-height: 1;
-  transition: color 0.12s, opacity 0.12s;
+  transition:
+    color 0.12s,
+    opacity 0.12s;
 }
 
 .tunnel-item:hover .pin-btn,

@@ -166,7 +166,9 @@ declare global {
       exportConnections(): Promise<{ canceled?: boolean; count?: number }>;
       importConnections(): Promise<{ canceled?: boolean; added?: number }>;
       showNotification(title: string, body: string): Promise<void>;
-      testHttp(url: string): Promise<{ statusCode: number | null; timeMs: number; error?: string }>;
+      testHttp(
+        url: string,
+      ): Promise<{ statusCode: number | null; timeMs: number; error?: string }>;
       deleteTempConnections(): Promise<void>;
       sftpList(sid: string, remotePath: string): Promise<SftpEntry[]>;
       sftpHome(sid: string): Promise<string>;
@@ -222,7 +224,8 @@ let currentSettings: Settings | null = null;
 const systemThemeMq = window.matchMedia("(prefers-color-scheme: dark)");
 
 function applyTheme(theme: "dark" | "light" | "system") {
-  const resolved = theme === "system" ? (systemThemeMq.matches ? "dark" : "light") : theme;
+  const resolved =
+    theme === "system" ? (systemThemeMq.matches ? "dark" : "light") : theme;
   document.documentElement.dataset.theme = resolved;
 }
 
@@ -1581,12 +1584,20 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
         const entry = tab.sftpEntries.find((e) => e.name === name);
         if (!entry) continue;
         try {
-          await window.api.sftpDelete(tab.sessionId, sftpJoin(tab.sftpPath, name), entry.isDir);
+          await window.api.sftpDelete(
+            tab.sessionId,
+            sftpJoin(tab.sftpPath, name),
+            entry.isDir,
+          );
         } catch {}
       }
       tab.multiSelected.clear();
       void sftpNavigate(connId, tab.tabId, tab.sftpPath);
-      setSftpStatus(connId, tab, `${items.length} item${items.length !== 1 ? "s" : ""} deleted.`);
+      setSftpStatus(
+        connId,
+        tab,
+        `${items.length} item${items.length !== 1 ? "s" : ""} deleted.`,
+      );
     });
     multiBar.append(clearBtn, delBtn);
     root.appendChild(toolbar);
@@ -1709,11 +1720,13 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
     void sftpNavigate(connId, tab.tabId, parent);
   });
 
-  breadcrumbOrInput.querySelectorAll<HTMLButtonElement>(".sftp-crumb-btn").forEach((btn) => {
-    btn.addEventListener("click", () =>
-      sftpNavigate(connId, tab.tabId, btn.dataset.path!),
-    );
-  });
+  breadcrumbOrInput
+    .querySelectorAll<HTMLButtonElement>(".sftp-crumb-btn")
+    .forEach((btn) => {
+      btn.addEventListener("click", () =>
+        sftpNavigate(connId, tab.tabId, btn.dataset.path!),
+      );
+    });
 
   hiddenBtn.addEventListener("click", () => {
     tab.sftpShowHidden = !tab.sftpShowHidden;
@@ -2670,7 +2683,11 @@ function renderSettingsPanel() {
   document.getElementById("s-export")!.addEventListener("click", async () => {
     try {
       const res = await window.api.exportConnections();
-      if (!res.canceled) showToast(`Exported ${res.count} tunnel${res.count !== 1 ? "s" : ""}.`, "success");
+      if (!res.canceled)
+        showToast(
+          `Exported ${res.count} tunnel${res.count !== 1 ? "s" : ""}.`,
+          "success",
+        );
     } catch (err) {
       showToast(errorMsg(err, "Export failed."), "error");
     }
@@ -2680,7 +2697,10 @@ function renderSettingsPanel() {
     try {
       const res = await window.api.importConnections();
       if (!res.canceled) {
-        showToast(`Imported ${res.added} tunnel${res.added !== 1 ? "s" : ""}.`, "success");
+        showToast(
+          `Imported ${res.added} tunnel${res.added !== 1 ? "s" : ""}.`,
+          "success",
+        );
         await refreshConnections();
       }
     } catch (err) {
@@ -2699,9 +2719,15 @@ function renderSettingsPanel() {
     const logDays =
       parseInt((document.getElementById("s-log-retention") as HTMLInputElement).value) ||
       30;
-    const sftpDl = (document.getElementById("s-sftp-dl") as HTMLInputElement)?.value.trim() ?? "";
-    const theme = (document.getElementById("s-theme") as HTMLSelectElement)?.value as "dark" | "light" | "system" ?? "dark";
-    const autoReconnect = (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
+    const sftpDl =
+      (document.getElementById("s-sftp-dl") as HTMLInputElement)?.value.trim() ?? "";
+    const theme =
+      ((document.getElementById("s-theme") as HTMLSelectElement)?.value as
+        | "dark"
+        | "light"
+        | "system") ?? "dark";
+    const autoReconnect =
+      (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
     try {
       currentSettings = await window.api.saveSettings({
         minimizeToTray: minTray,
@@ -2953,8 +2979,11 @@ saveForm.addEventListener("submit", async (e) => {
     notes: notesInput.value.trim(),
     group: groupInput.value.trim(),
     sshKeyPath: sshKeyPathInput.value.trim(),
-    jumpHost: (document.getElementById("jump-host") as HTMLInputElement)?.value.trim() || undefined,
-    jumpPort: Number((document.getElementById("jump-port") as HTMLInputElement)?.value) || 22,
+    jumpHost:
+      (document.getElementById("jump-host") as HTMLInputElement)?.value.trim() ||
+      undefined,
+    jumpPort:
+      Number((document.getElementById("jump-port") as HTMLInputElement)?.value) || 22,
   };
 
   if (!conn.hostname) {
@@ -3153,10 +3182,16 @@ if (!IS_TERMINAL_WINDOW) {
       }
       if (prev === "connecting") {
         appendLog(`Connection failed — ${connName(data.id)}`);
-        void window.api.showNotification("TunnelDesk", `Connection failed — ${connName(data.id)}`);
+        void window.api.showNotification(
+          "TunnelDesk",
+          `Connection failed — ${connName(data.id)}`,
+        );
       } else if (prev === "connected") {
         appendLog(`Tunnel disconnected — ${connName(data.id)}`);
-        void window.api.showNotification("TunnelDesk", `Disconnected — ${connName(data.id)}`);
+        void window.api.showNotification(
+          "TunnelDesk",
+          `Disconnected — ${connName(data.id)}`,
+        );
       }
     } else if (data.status === "connected" && prev !== "connected") {
       authPendingUrls.delete(data.id);
@@ -3352,8 +3387,12 @@ async function initFormWindow(connId: string | null): Promise<void> {
           ? "Leave empty to keep existing"
           : "Leave empty if key has no passphrase";
         notesInput.value = conn.notes || "";
-        const jumpHostEl = document.getElementById("jump-host") as HTMLInputElement | null;
-        const jumpPortEl = document.getElementById("jump-port") as HTMLInputElement | null;
+        const jumpHostEl = document.getElementById(
+          "jump-host",
+        ) as HTMLInputElement | null;
+        const jumpPortEl = document.getElementById(
+          "jump-port",
+        ) as HTMLInputElement | null;
         if (jumpHostEl) jumpHostEl.value = conn.jumpHost || "";
         if (jumpPortEl) jumpPortEl.value = String(conn.jumpPort ?? 22);
         updateSshKeyVisibility();
@@ -3411,7 +3450,8 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
       startW = sidebarEl.offsetWidth;
       sidebarResizeHandle.classList.add("dragging");
       document.body.style.cursor = "col-resize";
-      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect = "none";
+      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect =
+        "none";
       e.preventDefault();
     });
     document.addEventListener("mousemove", (e) => {
@@ -3424,7 +3464,8 @@ if (!IS_TERMINAL_WINDOW && !IS_FORM_WINDOW) {
       resizing = false;
       sidebarResizeHandle.classList.remove("dragging");
       document.body.style.cursor = "";
-      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect = "";
+      (document.body.style as CSSStyleDeclaration & { userSelect: string }).userSelect =
+        "";
     });
   }
 }
@@ -3458,9 +3499,15 @@ function showShortcutsOverlay() {
       <div class="shortcut-row"><span>This help</span><kbd>?</kbd></div>
     </div>
   `;
-  const close = () => { if (document.body.contains(overlay)) document.body.removeChild(overlay); };
-  overlay.addEventListener("click", (e) => { if (e.target === overlay) close(); });
-  overlay.addEventListener("keydown", (e) => { if (e.key === "Escape") close(); });
+  const close = () => {
+    if (document.body.contains(overlay)) document.body.removeChild(overlay);
+  };
+  overlay.addEventListener("click", (e) => {
+    if (e.target === overlay) close();
+  });
+  overlay.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") close();
+  });
   document.body.appendChild(overlay);
   (overlay as HTMLElement).setAttribute("tabindex", "-1");
   (overlay as HTMLElement).focus();
@@ -3489,7 +3536,9 @@ if (quickConnectModal) {
   document.getElementById("quick-connect")?.addEventListener("click", openQc);
   document.getElementById("qc-cancel")?.addEventListener("click", closeQc);
   document.getElementById("qc-cancel-top")?.addEventListener("click", closeQc);
-  quickConnectModal.addEventListener("click", (e) => { if (e.target === quickConnectModal) closeQc(); });
+  quickConnectModal.addEventListener("click", (e) => {
+    if (e.target === quickConnectModal) closeQc();
+  });
 
   qcProto?.addEventListener("change", () => {
     if (qcPort) qcPort.value = String(PROTOCOL_DEFAULT_PORTS[qcProto.value] ?? 22);
@@ -3498,7 +3547,10 @@ if (quickConnectModal) {
   qcForm?.addEventListener("submit", async (e) => {
     e.preventDefault();
     const host = qcHost?.value.trim();
-    if (!host) { showToast("Host is required.", "error"); return; }
+    if (!host) {
+      showToast("Host is required.", "error");
+      return;
+    }
     const proto = qcProto?.value || "ssh";
     const port = Number(qcPort?.value) || 22;
     const user = (document.getElementById("qc-user") as HTMLInputElement)?.value.trim();
@@ -3550,7 +3602,9 @@ function makeSidebarItemDraggable(item: HTMLElement, connId: string) {
     if (from === -1 || to === -1) return;
     ids.splice(from, 1);
     ids.splice(to, 0, dragSrcId);
-    connections = connections.slice().sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
+    connections = connections
+      .slice()
+      .sort((a, b) => ids.indexOf(a.id) - ids.indexOf(b.id));
     dragSrcId = null;
     renderSidebar();
     try {

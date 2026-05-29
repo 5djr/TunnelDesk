@@ -165,7 +165,8 @@ function openJumpProxy(connection, password, keyPassphrase) {
     const jumpCfg = {
       host: connection.jumpHost,
       port: connection.jumpPort || 22,
-      username: (connection.username && connection.username.trim()) || os.userInfo().username,
+      username:
+        (connection.username && connection.username.trim()) || os.userInfo().username,
       password,
       readyTimeout: 20000,
       tryKeyboard: true,
@@ -177,15 +178,22 @@ function openJumpProxy(connection, password, keyPassphrase) {
       } catch {}
     }
     jumpClient.on("ready", () => {
-      const targetHost = connection.protocol === "ssh-cf" ? "127.0.0.1" : connection.hostname;
-      jumpClient.forwardOut("127.0.0.1", 0, targetHost, connection.port || 22, (err, stream) => {
-        if (err) {
-          jumpClient.end();
-          reject(new Error(`Jump host tunnel failed: ${err.message}`));
-          return;
-        }
-        resolve({ stream, jumpClient });
-      });
+      const targetHost =
+        connection.protocol === "ssh-cf" ? "127.0.0.1" : connection.hostname;
+      jumpClient.forwardOut(
+        "127.0.0.1",
+        0,
+        targetHost,
+        connection.port || 22,
+        (err, stream) => {
+          if (err) {
+            jumpClient.end();
+            reject(new Error(`Jump host tunnel failed: ${err.message}`));
+            return;
+          }
+          resolve({ stream, jumpClient });
+        },
+      );
     });
     jumpClient.on("keyboard-interactive", (_n, _i, _l, prompts, finish) => {
       finish(prompts.map(() => password || ""));
@@ -201,10 +209,16 @@ async function sshCreateTerm(connectionId, onData, onClose) {
   const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
   let cfg = buildConnectConfig(connection, password, keyPassphrase);
   if (connection.jumpHost) {
-    const { stream: sock, jumpClient } = await openJumpProxy(connection, password, keyPassphrase);
+    const { stream: sock, jumpClient } = await openJumpProxy(
+      connection,
+      password,
+      keyPassphrase,
+    );
     cfg = { ...cfg, sock };
     return createTermSession(connectionId, cfg, onData, (sid, code, signal) => {
-      try { jumpClient.end(); } catch {}
+      try {
+        jumpClient.end();
+      } catch {}
       onClose(sid, code, signal);
     });
   }
@@ -267,10 +281,16 @@ async function sshCreateSftp(connectionId, onClose) {
   const { connection, password, keyPassphrase } = await resolveConnection(connectionId);
   let cfg = buildConnectConfig(connection, password, keyPassphrase);
   if (connection.jumpHost) {
-    const { stream: sock, jumpClient } = await openJumpProxy(connection, password, keyPassphrase);
+    const { stream: sock, jumpClient } = await openJumpProxy(
+      connection,
+      password,
+      keyPassphrase,
+    );
     cfg = { ...cfg, sock };
     return createSftpSession(connectionId, cfg, (sid) => {
-      try { jumpClient.end(); } catch {}
+      try {
+        jumpClient.end();
+      } catch {}
       onClose(sid);
     });
   }
