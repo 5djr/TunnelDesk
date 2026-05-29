@@ -1,7 +1,7 @@
 const fs = require("fs").promises;
 const path = require("path");
 const { state } = require("./state");
-const { encryptPassword } = require("./crypto");
+const { encryptPassword, encryptFile, decryptFile } = require("./crypto");
 const { normalizePort, sanitizeProtocol } = require("./validation");
 
 function configPath() {
@@ -10,8 +10,10 @@ function configPath() {
 
 async function readConnections() {
   try {
-    const file = await fs.readFile(configPath(), "utf8");
-    const parsed = JSON.parse(file);
+    const raw = await fs.readFile(configPath(), "utf8");
+    const json = decryptFile(raw);
+    if (json === null) return []; // decryption failed (wrong machine / corrupted)
+    const parsed = JSON.parse(json);
     return Array.isArray(parsed) ? parsed : [];
   } catch {
     return [];
@@ -23,7 +25,7 @@ async function readConnections() {
 async function writeConnections(connections) {
   const file = configPath();
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await fs.writeFile(tmp, JSON.stringify(connections, null, 2), "utf8");
+  await fs.writeFile(tmp, encryptFile(JSON.stringify(connections, null, 2)), "utf8");
   await fs.rename(tmp, file);
 }
 

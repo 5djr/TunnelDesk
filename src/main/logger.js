@@ -1,6 +1,7 @@
 const fs = require("fs");
 const path = require("path");
 const { state } = require("./state");
+const { encryptFile } = require("./crypto");
 
 const MAX_BYTES = 512 * 1024;
 const MAX_ROTATED = 3;
@@ -55,7 +56,9 @@ function initLogger() {
 
 function writeLog(id, message) {
   if (!writeStream) return;
-  const line = `${new Date().toISOString()}\t${id || ""}\t${message}\n`;
+  const plain = `${new Date().toISOString()}\t${id || ""}\t${message}`;
+  // Each log entry is encrypted individually so the append stream is preserved.
+  const line = encryptFile(plain) + "\n";
   try {
     writeStream.write(line);
     currentSize += Buffer.byteLength(line, "utf8");

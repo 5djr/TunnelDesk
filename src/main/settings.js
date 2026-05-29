@@ -1,6 +1,7 @@
 const fs = require("fs").promises;
 const path = require("path");
 const { state } = require("./state");
+const { encryptFile, decryptFile } = require("./crypto");
 
 const DEFAULTS = {
   cloudflaredPath: "",
@@ -33,7 +34,9 @@ function settingsPath() {
 async function readSettings() {
   try {
     const raw = await fs.readFile(settingsPath(), "utf8");
-    return { ...DEFAULTS, ...JSON.parse(raw) };
+    const json = decryptFile(raw);
+    if (json === null) return { ...DEFAULTS }; // decryption failed
+    return { ...DEFAULTS, ...JSON.parse(json) };
   } catch {
     return { ...DEFAULTS };
   }
@@ -90,7 +93,7 @@ async function writeSettings(partial) {
   const merged = { ...current, ...safe };
   const file = settingsPath();
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await fs.writeFile(tmp, JSON.stringify(merged, null, 2), "utf8");
+  await fs.writeFile(tmp, encryptFile(JSON.stringify(merged, null, 2)), "utf8");
   await fs.rename(tmp, file);
   return merged;
 }
