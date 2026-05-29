@@ -15,6 +15,8 @@ const DEFAULTS = {
   connectionOrder: [],
   autoReconnect: true,
   autoReconnectAttempts: 3,
+  osCache: {},
+  osCacheDurationHours: 6,
 };
 
 const VALID_PROTOCOLS = new Set([
@@ -89,6 +91,18 @@ async function writeSettings(partial) {
       1,
       Math.min(10, Math.floor(partial.autoReconnectAttempts)),
     );
+  }
+  if (partial.osCache && typeof partial.osCache === "object" && !Array.isArray(partial.osCache)) {
+    const cleaned = {};
+    for (const [k, v] of Object.entries(partial.osCache)) {
+      if (v && typeof v.osInfo === "string" && typeof v.cachedAt === "number") {
+        cleaned[k] = { osInfo: v.osInfo, cachedAt: v.cachedAt };
+      }
+    }
+    safe.osCache = cleaned;
+  }
+  if (typeof partial.osCacheDurationHours === "number") {
+    safe.osCacheDurationHours = Math.max(1, Math.min(168, Math.floor(partial.osCacheDurationHours)));
   }
   const merged = { ...current, ...safe };
   const file = settingsPath();

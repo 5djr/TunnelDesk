@@ -65,6 +65,8 @@ interface Settings {
   connectionOrder: string[];
   autoReconnect: boolean;
   autoReconnectAttempts: number;
+  osCache: Record<string, { osInfo: string; cachedAt: number }>;
+  osCacheDurationHours: number;
 }
 
 type TermTabType = "term" | "sftp";
@@ -1190,6 +1192,15 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
         sid = result.sid;
         const st = termState.get(connId);
         if (st) st.osInfo = result.osInfo;
+        // Persist to cache so the sidebar icon updates
+        if (result.osInfo && result.osInfo !== "unknown") {
+          const nowMs = Date.now();
+          const osCache = { ...(currentSettings?.osCache ?? {}), [connId]: { osInfo: result.osInfo, cachedAt: nowMs } };
+          try {
+            currentSettings = await window.api.saveSettings({ osCache });
+            renderSidebar(); // refresh sidebar icon immediately
+          } catch {}
+        }
       }
 
       if (tab.cancelled) {
@@ -1898,38 +1909,51 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   return root;
 }
 
-// ─── OS / distro icon for terminal tabs ──────────────────────────────────────
+// ─── OS / distro icon ────────────────────────────────────────────────────────
 
-function getOsIcon(os: string): string {
+function getOsIcon(os: string, size = 14): string {
   const s = (os || "").toLowerCase().replace(/-/g, "");
-  // Windows — 4-colour flag
-  if (s === "windows" || s === "windowsnt") return `<svg width="14" height="14" viewBox="0 0 14 14"><rect x="0.5" y="0.5" width="5.5" height="5.5" fill="#F25022"/><rect x="8" y="0.5" width="5.5" height="5.5" fill="#7FBA00"/><rect x="0.5" y="8" width="5.5" height="5.5" fill="#00A4EF"/><rect x="8" y="8" width="5.5" height="5.5" fill="#FFB900"/></svg>`;
-  // Ubuntu — orange circle, 3 dots
-  if (s.startsWith("ubuntu")) return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#E95420"/><circle cx="7" cy="2.5" r="1.3" fill="white"/><circle cx="10.8" cy="9" r="1.3" fill="white"/><circle cx="3.2" cy="9" r="1.3" fill="white"/></svg>`;
-  // Debian — red circle + swirl arc
-  if (s === "debian") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#A80030"/><path d="M7 3.5a3.5 3.5 0 1 1-3 5.3" stroke="white" fill="none" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="3.5" r="1" fill="white"/></svg>`;
-  // Fedora — blue circle + F mark
-  if (s === "fedora") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#294172"/><path d="M7 10.5V7m0 0V4a2 2 0 0 1 4 0v3H7" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`;
-  // Arch Linux — upward triangle with cutout
-  if (s === "arch" || s === "archlinux") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L13 12.5H1Z" fill="#1793D1"/><path d="M7 5.5L9 10H5Z" fill="#111"/></svg>`;
-  // Alpine — mountain peak
-  if (s === "alpine") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L13 12.5H1Z" fill="#0D597F"/><path d="M5.5 12.5L7 8.5L8.5 12.5Z" fill="white"/></svg>`;
-  // CentOS / Rocky / AlmaLinux — diamond
-  if (s === "centos" || s === "rocky" || s === "almalinux" || s === "rhel") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L12.5 7L7 12.5L1.5 7Z" fill="#932279"/><path d="M7 4.5L9.5 7L7 9.5L4.5 7Z" fill="white"/></svg>`;
-  // Kali Linux — K on blue
-  if (s === "kali" || s === "kalirolling") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#268BEE"/><path d="M5 3.5V10.5M5 7L8.5 3.5M5 7L8.5 10.5" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-  // Raspberry Pi / Raspbian
-  if (s === "raspbian" || s === "raspios") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#BC1142"/><circle cx="7" cy="7" r="2" fill="white"/><circle cx="7" cy="2.8" r="0.9" fill="white"/><circle cx="7" cy="11.2" r="0.9" fill="white"/><circle cx="3" cy="5.4" r="0.9" fill="white"/><circle cx="11" cy="5.4" r="0.9" fill="white"/><circle cx="3" cy="8.6" r="0.9" fill="white"/><circle cx="11" cy="8.6" r="0.9" fill="white"/></svg>`;
-  // openSUSE
-  if (s.startsWith("opensuse") || s === "sles") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#73BA25"/><path d="M4.5 9.5a3.5 3.5 0 1 1 5 0" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>`;
-  // Linux Mint
-  if (s === "linuxmint") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#87CF3E"/><rect x="4" y="4" width="6" height="6" rx="1" fill="#3C6E47"/></svg>`;
-  // macOS / Darwin
-  if (s === "darwin" || s === "macos") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M10 4.5C9 3 7.5 2.5 6.5 2.5C5.5 2.5 4 3 3 4.5C2 6 2 8 3 9.5C3.5 10.5 4.5 11.5 6.5 11.5C8.5 11.5 9.5 10.5 10 9.5C11 8 11 6 10 4.5Z" fill="#aaa"/><path d="M7 1.5C7.5 1.5 8 2 8.5 2" stroke="#aaa" stroke-width="1.1" stroke-linecap="round" fill="none"/></svg>`;
-  // Telnet — wave lines
-  if (s === "telnet") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 5c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/><path d="M2 9c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>`;
-  // Default / generic Linux — terminal prompt
-  return `<svg width="14" height="14" viewBox="0 0 14 14"><polyline points="2,4.5 5.5,7 2,9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="7" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+  const d = `width="${size}" height="${size}" viewBox="0 0 14 14"`;
+  if (s === "windows" || s === "windowsnt")
+    return `<svg ${d}><rect x="0.5" y="0.5" width="5.5" height="5.5" fill="#F25022"/><rect x="8" y="0.5" width="5.5" height="5.5" fill="#7FBA00"/><rect x="0.5" y="8" width="5.5" height="5.5" fill="#00A4EF"/><rect x="8" y="8" width="5.5" height="5.5" fill="#FFB900"/></svg>`;
+  if (s.startsWith("ubuntu"))
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#E95420"/><circle cx="7" cy="2.5" r="1.3" fill="white"/><circle cx="10.8" cy="9" r="1.3" fill="white"/><circle cx="3.2" cy="9" r="1.3" fill="white"/></svg>`;
+  if (s === "debian")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#A80030"/><path d="M7 3.5a3.5 3.5 0 1 1-3 5.3" stroke="white" fill="none" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="3.5" r="1" fill="white"/></svg>`;
+  if (s === "fedora")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#294172"/><path d="M7 10.5V7m0 0V4a2 2 0 0 1 4 0v3H7" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`;
+  if (s === "arch" || s === "archlinux")
+    return `<svg ${d}><path d="M7 1.5L13 12.5H1Z" fill="#1793D1"/><path d="M7 5.5L9 10H5Z" fill="#111"/></svg>`;
+  if (s === "alpine")
+    return `<svg ${d}><path d="M7 1.5L13 12.5H1Z" fill="#0D597F"/><path d="M5.5 12.5L7 8.5L8.5 12.5Z" fill="white"/></svg>`;
+  if (s === "centos" || s === "rocky" || s === "almalinux" || s === "rhel")
+    return `<svg ${d}><path d="M7 1.5L12.5 7L7 12.5L1.5 7Z" fill="#932279"/><path d="M7 4.5L9.5 7L7 9.5L4.5 7Z" fill="white"/></svg>`;
+  if (s === "kali" || s === "kalirolling")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#268BEE"/><path d="M5 3.5V10.5M5 7L8.5 3.5M5 7L8.5 10.5" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  if (s === "raspbian" || s === "raspios")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#BC1142"/><circle cx="7" cy="7" r="2" fill="white"/><circle cx="7" cy="2.8" r="0.9" fill="white"/><circle cx="7" cy="11.2" r="0.9" fill="white"/><circle cx="3" cy="5.4" r="0.9" fill="white"/><circle cx="11" cy="5.4" r="0.9" fill="white"/><circle cx="3" cy="8.6" r="0.9" fill="white"/><circle cx="11" cy="8.6" r="0.9" fill="white"/></svg>`;
+  if (s.startsWith("opensuse") || s === "sles")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#73BA25"/><path d="M4.5 9.5a3.5 3.5 0 1 1 5 0" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>`;
+  if (s === "linuxmint")
+    return `<svg ${d}><circle cx="7" cy="7" r="5.5" fill="#87CF3E"/><rect x="4" y="4" width="6" height="6" rx="1" fill="#3C6E47"/></svg>`;
+  if (s === "darwin" || s === "macos")
+    return `<svg ${d}><path d="M10 4.5C9 3 7.5 2.5 6.5 2.5C5.5 2.5 4 3 3 4.5C2 6 2 8 3 9.5C3.5 10.5 4.5 11.5 6.5 11.5C8.5 11.5 9.5 10.5 10 9.5C11 8 11 6 10 4.5Z" fill="#aaa"/><path d="M7 1.5C7.5 1.5 8 2 8.5 2" stroke="#aaa" stroke-width="1.1" stroke-linecap="round" fill="none"/></svg>`;
+  if (s === "telnet")
+    return `<svg ${d}><path d="M2 5c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/><path d="M2 9c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>`;
+  // Generic terminal prompt
+  return `<svg ${d}><polyline points="2,4.5 5.5,7 2,9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="7" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+}
+
+function getCachedOsInfo(connId: string, protocol: string): string {
+  // RDP always means Windows — no detection needed
+  if (protocol === "rdp-cf" || protocol === "rdp") return "windows";
+  const cache = currentSettings?.osCache;
+  if (!cache) return "unknown";
+  const entry = cache[connId];
+  if (!entry) return "unknown";
+  const durationMs = (currentSettings?.osCacheDurationHours ?? 6) * 3_600_000;
+  if (Date.now() - entry.cachedAt > durationMs) return "unknown"; // expired
+  return entry.osInfo;
 }
 
 function renderTerminalDetail(conn: Connection): void {
@@ -2145,17 +2169,17 @@ function renderTerminalDetail(conn: Connection): void {
 function makeSidebarItem(conn: Connection, pinnedIds: Set<string>): HTMLElement {
   const status = getStatus(conn.id);
   const isPinned = pinnedIds.has(conn.id);
+  const cachedOs = getCachedOsInfo(conn.id, conn.protocol);
+  const connIcon =
+    cachedOs !== "unknown"
+      ? getOsIcon(cachedOs, 16)
+      : `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>`;
   const item = document.createElement("div");
   item.className = `tunnel-item ${status}${selectedId === conn.id && !settingsView ? " active" : ""}${isPinned ? " pinned" : ""}`;
   item.dataset.id = conn.id;
   item.innerHTML = `
     <div class="tunnel-icon">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-        <rect x="2" y="2" width="20" height="8" rx="2"/>
-        <rect x="2" y="14" width="20" height="8" rx="2"/>
-        <line x1="6" y1="6" x2="6.01" y2="6"/>
-        <line x1="6" y1="18" x2="6.01" y2="18"/>
-      </svg>
+      ${connIcon}
       <span class="tunnel-status-dot"></span>
     </div>
     <div class="tunnel-item-info">
@@ -2596,6 +2620,18 @@ function renderSettingsPanel() {
         </div>
         <div class="settings-row">
           <div class="settings-row-label">
+            <span class="settings-label">OS icon cache duration</span>
+            <span class="settings-desc">How long to remember the detected OS/distro icon per connection.</span>
+          </div>
+          <select class="form-input settings-select" id="s-os-cache">
+            <option value="1" ${(s.osCacheDurationHours ?? 6) === 1 ? "selected" : ""}>1 hour</option>
+            <option value="6" ${(s.osCacheDurationHours ?? 6) === 6 ? "selected" : ""}>6 hours (default)</option>
+            <option value="24" ${s.osCacheDurationHours === 24 ? "selected" : ""}>24 hours</option>
+            <option value="168" ${s.osCacheDurationHours === 168 ? "selected" : ""}>1 week</option>
+          </select>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
             <span class="settings-label">Auto-reconnect terminal</span>
             <span class="settings-desc">Automatically retry when an SSH or Telnet session drops unexpectedly (up to 3 attempts).</span>
           </div>
@@ -2773,6 +2809,8 @@ function renderSettingsPanel() {
         | "system") ?? "dark";
     const autoReconnect =
       (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
+    const osCacheDurationHours =
+      Number((document.getElementById("s-os-cache") as HTMLSelectElement)?.value) || 6;
     try {
       currentSettings = await window.api.saveSettings({
         minimizeToTray: minTray,
@@ -2783,6 +2821,7 @@ function renderSettingsPanel() {
         sftpDownloadFolder: sftpDl,
         theme,
         autoReconnect,
+        osCacheDurationHours,
       });
       applyTheme(theme);
       showToast("Settings saved.", "success");
