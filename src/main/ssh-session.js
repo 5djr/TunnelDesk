@@ -99,6 +99,43 @@ function cancelPendingConnections(connectionId) {
   pendingClients.delete(connectionId);
 }
 
+// Detect the remote OS by running a quick non-interactive exec. Runs concurrently
+// with the PTY shell open so it adds no noticeable latency.
+function detectOsInfo(client) {
+  return new Promise((resolve) => {
+    const done = setTimeout(() => resolve("unknown"), 2000);
+    const cmd =
+      'uname -s 2>/dev/null; cat /etc/os-release 2>/dev/null | grep -m1 "^ID=" | tr -d \'"ID= \'';
+    client.exec(cmd, (err, stream) => {
+      if (err) {
+        clearTimeout(done);
+        resolve("unknown");
+        return;
+      }
+      let out = "";
+      stream.on("data", (d) => {
+        if (out.length < 256) out += d.toString();
+      });
+      stream.stderr.resume();
+      stream.on("close", () => {
+        clearTimeout(done);
+        const lines = out
+          .trim()
+          .toLowerCase()
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean);
+        const kernel = lines[0] || "";
+        const distro = lines[1] || "";
+        if (kernel === "linux") resolve(distro || "linux");
+        else if (kernel === "darwin") resolve("darwin");
+        else if (kernel.includes("cygwin") || kernel.includes("msys")) resolve("windows");
+        else resolve(kernel || "unknown");
+      });
+    });
+  });
+}
+
 function createTermSession(connectionId, cfg, onData, onClose) {
   return new Promise((resolve, reject) => {
     const client = new Client();
@@ -106,6 +143,8 @@ function createTermSession(connectionId, cfg, onData, onClose) {
 
     client.on("ready", () => {
       untrackPending(connectionId, client);
+      // Kick off OS detection concurrently so it doesn't block the shell open.
+      const osPromise = detectOsInfo(client);
       client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
         if (err) {
           try {
@@ -136,7 +175,10 @@ function createTermSession(connectionId, cfg, onData, onClose) {
           onClose(sid, code, signal);
           client.end();
         });
-        resolve(sid);
+        // Resolve once both the shell and OS detection are settled.
+        osPromise
+          .then((osInfo) => resolve({ sid, osInfo }))
+          .catch(() => resolve({ sid, osInfo: "unknown" }));
       });
     });
 

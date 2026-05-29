@@ -1546,53 +1546,74 @@ body {
   overflow: hidden;
 }
 
-/* ─── Terminal tab bar ────────────────────────────────────────────────────── */
+/* ─── Terminal tab bar — Windows Terminal style ───────────────────────────── */
 
 .term-tab-bar {
   display: flex;
-  align-items: flex-end;
-  background: var(--nav);
-  border-bottom: 1px solid var(--border);
-  height: 38px;
+  align-items: stretch;
+  background: #111;
+  height: 36px;
   flex-shrink: 0;
   overflow: hidden;
-  padding: 0 4px;
-  gap: 2px;
+  padding: 0 2px;
+  gap: 1px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="light"] .term-tab-bar {
+  background: #d0d0d0;
+  border-bottom-color: rgba(0, 0, 0, 0.1);
 }
 
 .term-tab {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 0 10px 0 12px;
-  height: 30px;
-  margin-bottom: -1px;
+  padding: 0 6px 0 10px;
   font-size: 12px;
-  color: var(--text-muted);
+  color: rgba(255, 255, 255, 0.4);
   cursor: pointer;
   white-space: nowrap;
-  max-width: 180px;
+  max-width: 200px;
   min-width: 90px;
-  position: relative;
   user-select: none;
-  border-radius: 7px 7px 0 0;
-  border: 1px solid transparent;
-  border-bottom: none;
-  transition:
-    background 0.1s,
-    color 0.1s;
+  border-radius: 0;
+  border: none;
+  transition: background 0.1s, color 0.1s;
+}
+
+[data-theme="light"] .term-tab {
+  color: rgba(0, 0, 0, 0.4);
 }
 
 .term-tab:hover {
-  color: var(--text-label);
-  background: rgba(255, 255, 255, 0.05);
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+[data-theme="light"] .term-tab:hover {
+  color: rgba(0, 0, 0, 0.7);
+  background: rgba(0, 0, 0, 0.06);
 }
 
 .term-tab.active {
-  color: var(--text);
-  background: var(--bg);
-  border-color: var(--border);
-  border-bottom-color: var(--bg);
+  color: rgba(255, 255, 255, 0.92);
+  background: rgba(255, 255, 255, 0.09);
+}
+
+[data-theme="light"] .term-tab.active {
+  color: rgba(0, 0, 0, 0.87);
+  background: rgba(0, 0, 0, 0.08);
+}
+
+/* Distro / OS icon */
+.term-tab-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .term-tab-label {
@@ -1606,50 +1627,61 @@ body {
   border: none;
   color: inherit;
   cursor: pointer;
-  font-size: 14px;
+  font-size: 12px;
   line-height: 1;
-  padding: 2px 3px;
+  width: 18px;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   opacity: 0;
   flex-shrink: 0;
   border-radius: 4px;
-  transition:
-    opacity 0.1s,
-    background 0.1s;
+  transition: opacity 0.1s, background 0.1s;
 }
 
 .term-tab:hover .term-tab-close,
 .term-tab.active .term-tab-close {
-  opacity: 0.45;
+  opacity: 0.5;
 }
 
 .term-tab-close:hover {
   opacity: 1 !important;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.12);
 }
 
+[data-theme="light"] .term-tab-close:hover {
+  background: rgba(0, 0, 0, 0.1);
+}
+
+/* "+" new tab button */
 .term-new-btn {
   background: none;
   border: none;
-  color: var(--text-muted);
+  color: rgba(255, 255, 255, 0.35);
   cursor: pointer;
-  font-size: 18px;
-  line-height: 1;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  border-radius: 6px;
-  margin-bottom: -1px;
-  transition:
-    background 0.1s,
-    color 0.1s;
+  border-radius: 0;
+  transition: background 0.1s, color 0.1s;
+}
+
+[data-theme="light"] .term-new-btn {
+  color: rgba(0, 0, 0, 0.35);
 }
 
 .term-new-btn:hover {
-  color: var(--text);
-  background: rgba(255, 255, 255, 0.07);
+  color: rgba(255, 255, 255, 0.9);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="light"] .term-new-btn:hover {
+  color: rgba(0, 0, 0, 0.8);
+  background: rgba(0, 0, 0, 0.07);
 }
 
 .term-bar-spacer {
@@ -1661,8 +1693,11 @@ body {
   align-items: center;
   gap: 4px;
   padding: 0 6px;
-  border-left: 1px solid var(--border);
-  height: 100%;
+  border-left: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+[data-theme="light"] .term-bar-actions {
+  border-left-color: rgba(0, 0, 0, 0.08);
 }
 
 /* ─── Terminal panels ─────────────────────────────────────────────────────── */
@@ -2068,7 +2103,6 @@ body.form-window-mode .modal-close {
   background: rgba(108, 203, 95, 0.12);
   border-radius: 10px;
   padding: 2px 8px;
-  margin-left: 8px;
   font-weight: 500;
   flex-shrink: 0;
 }

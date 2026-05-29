@@ -110,6 +110,7 @@ interface TermTab {
 interface ConnTermState {
   tabs: TermTab[];
   activeTabId: string | null;
+  osInfo: string;
 }
 
 declare global {
@@ -157,7 +158,7 @@ declare global {
       telnetWrite(sid: string, data: string): Promise<void>;
       telnetResize(sid: string, cols: number, rows: number): Promise<void>;
       telnetCloseSession(sid: string): Promise<void>;
-      sshTermCreate(connectionId: string): Promise<string>;
+      sshTermCreate(connectionId: string): Promise<{ sid: string; osInfo: string }>;
       sshSftpCreate(connectionId: string): Promise<string>;
       sshWrite(sid: string, data: string): Promise<void>;
       sshResize(sid: string, cols: number, rows: number): Promise<void>;
@@ -980,7 +981,7 @@ function showPrompt(message: string, defaultValue: string): Promise<string | nul
 // ─── Terminal management ──────────────────────────────────────────────────────
 
 function getOrInitTermState(connId: string): ConnTermState {
-  if (!termState.has(connId)) termState.set(connId, { tabs: [], activeTabId: null });
+  if (!termState.has(connId)) termState.set(connId, { tabs: [], activeTabId: null, osInfo: "unknown" });
   return termState.get(connId)!;
 }
 
@@ -1179,9 +1180,17 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
 
   try {
     if (type === "term") {
-      const sid = isTelnet
-        ? await window.api.telnetTermCreate(connId)
-        : await window.api.sshTermCreate(connId);
+      let sid: string;
+      if (isTelnet) {
+        sid = await window.api.telnetTermCreate(connId);
+        const st = termState.get(connId);
+        if (st) st.osInfo = "telnet";
+      } else {
+        const result = await window.api.sshTermCreate(connId);
+        sid = result.sid;
+        const st = termState.get(connId);
+        if (st) st.osInfo = result.osInfo;
+      }
 
       if (tab.cancelled) {
         // Tab was closed while connecting — kill the session immediately.
@@ -1889,6 +1898,40 @@ function renderSftpPanel(connId: string, tab: TermTab): HTMLElement {
   return root;
 }
 
+// ─── OS / distro icon for terminal tabs ──────────────────────────────────────
+
+function getOsIcon(os: string): string {
+  const s = (os || "").toLowerCase().replace(/-/g, "");
+  // Windows — 4-colour flag
+  if (s === "windows" || s === "windowsnt") return `<svg width="14" height="14" viewBox="0 0 14 14"><rect x="0.5" y="0.5" width="5.5" height="5.5" fill="#F25022"/><rect x="8" y="0.5" width="5.5" height="5.5" fill="#7FBA00"/><rect x="0.5" y="8" width="5.5" height="5.5" fill="#00A4EF"/><rect x="8" y="8" width="5.5" height="5.5" fill="#FFB900"/></svg>`;
+  // Ubuntu — orange circle, 3 dots
+  if (s.startsWith("ubuntu")) return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#E95420"/><circle cx="7" cy="2.5" r="1.3" fill="white"/><circle cx="10.8" cy="9" r="1.3" fill="white"/><circle cx="3.2" cy="9" r="1.3" fill="white"/></svg>`;
+  // Debian — red circle + swirl arc
+  if (s === "debian") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#A80030"/><path d="M7 3.5a3.5 3.5 0 1 1-3 5.3" stroke="white" fill="none" stroke-width="1.5" stroke-linecap="round"/><circle cx="7" cy="3.5" r="1" fill="white"/></svg>`;
+  // Fedora — blue circle + F mark
+  if (s === "fedora") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#294172"/><path d="M7 10.5V7m0 0V4a2 2 0 0 1 4 0v3H7" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" fill="none"/></svg>`;
+  // Arch Linux — upward triangle with cutout
+  if (s === "arch" || s === "archlinux") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L13 12.5H1Z" fill="#1793D1"/><path d="M7 5.5L9 10H5Z" fill="#111"/></svg>`;
+  // Alpine — mountain peak
+  if (s === "alpine") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L13 12.5H1Z" fill="#0D597F"/><path d="M5.5 12.5L7 8.5L8.5 12.5Z" fill="white"/></svg>`;
+  // CentOS / Rocky / AlmaLinux — diamond
+  if (s === "centos" || s === "rocky" || s === "almalinux" || s === "rhel") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M7 1.5L12.5 7L7 12.5L1.5 7Z" fill="#932279"/><path d="M7 4.5L9.5 7L7 9.5L4.5 7Z" fill="white"/></svg>`;
+  // Kali Linux — K on blue
+  if (s === "kali" || s === "kalirolling") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#268BEE"/><path d="M5 3.5V10.5M5 7L8.5 3.5M5 7L8.5 10.5" stroke="white" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
+  // Raspberry Pi / Raspbian
+  if (s === "raspbian" || s === "raspios") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#BC1142"/><circle cx="7" cy="7" r="2" fill="white"/><circle cx="7" cy="2.8" r="0.9" fill="white"/><circle cx="7" cy="11.2" r="0.9" fill="white"/><circle cx="3" cy="5.4" r="0.9" fill="white"/><circle cx="11" cy="5.4" r="0.9" fill="white"/><circle cx="3" cy="8.6" r="0.9" fill="white"/><circle cx="11" cy="8.6" r="0.9" fill="white"/></svg>`;
+  // openSUSE
+  if (s.startsWith("opensuse") || s === "sles") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#73BA25"/><path d="M4.5 9.5a3.5 3.5 0 1 1 5 0" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg>`;
+  // Linux Mint
+  if (s === "linuxmint") return `<svg width="14" height="14" viewBox="0 0 14 14"><circle cx="7" cy="7" r="5.5" fill="#87CF3E"/><rect x="4" y="4" width="6" height="6" rx="1" fill="#3C6E47"/></svg>`;
+  // macOS / Darwin
+  if (s === "darwin" || s === "macos") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M10 4.5C9 3 7.5 2.5 6.5 2.5C5.5 2.5 4 3 3 4.5C2 6 2 8 3 9.5C3.5 10.5 4.5 11.5 6.5 11.5C8.5 11.5 9.5 10.5 10 9.5C11 8 11 6 10 4.5Z" fill="#aaa"/><path d="M7 1.5C7.5 1.5 8 2 8.5 2" stroke="#aaa" stroke-width="1.1" stroke-linecap="round" fill="none"/></svg>`;
+  // Telnet — wave lines
+  if (s === "telnet") return `<svg width="14" height="14" viewBox="0 0 14 14"><path d="M2 5c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/><path d="M2 9c1.5-1.5 3.5-1.5 5 0s3.5 1.5 5 0" stroke="currentColor" stroke-width="1.3" fill="none" stroke-linecap="round"/></svg>`;
+  // Default / generic Linux — terminal prompt
+  return `<svg width="14" height="14" viewBox="0 0 14 14"><polyline points="2,4.5 5.5,7 2,9.5" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/><line x1="7" y1="9.5" x2="12" y2="9.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/></svg>`;
+}
+
 function renderTerminalDetail(conn: Connection): void {
   const state = termState.get(conn.id);
 
@@ -1907,10 +1950,12 @@ function renderTerminalDetail(conn: Connection): void {
   const tabBar = document.createElement("div");
   tabBar.className = "term-tab-bar";
 
+  const osIcon = getOsIcon(state.osInfo);
+
   for (const tab of state.tabs) {
     const tabEl = document.createElement("div");
     tabEl.className = `term-tab${tab.tabId === state.activeTabId ? " active" : ""}`;
-    tabEl.innerHTML = `<span class="term-tab-label">${escapeHtml(tab.label)}</span><button class="term-tab-close" title="Close tab">×</button>`;
+    tabEl.innerHTML = `<span class="term-tab-icon">${osIcon}</span><span class="term-tab-label">${escapeHtml(tab.label)}</span><button class="term-tab-close" title="Close tab">×</button>`;
     tabEl.addEventListener("click", (e) => {
       if ((e.target as HTMLElement).classList.contains("term-tab-close")) {
         closeTermTab(conn.id, tab.tabId);
