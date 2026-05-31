@@ -2,7 +2,7 @@
 
 > Cloudflare Zero Trust connection manager for Windows, Linux, and macOS
 
-[![Version](https://img.shields.io/badge/version-0.2.4-blue.svg)](https://github.com/5djr/TunnelDesk/releases)
+[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](https://github.com/5djr/TunnelDesk/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -259,6 +259,18 @@ Cross-platform packaging (e.g. building macOS DMG from Windows) is not supported
 | [electron-builder](https://www.electron.build/)                                        | MIT        |
 
 TunnelDesk launches `cloudflared` as an external process. `cloudflared` is developed by Cloudflare, Inc. and is subject to its own [license](https://github.com/cloudflare/cloudflared/blob/master/LICENSE). TunnelDesk does not bundle or redistribute `cloudflared`.
+
+---
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines on setting up the dev environment, code style, and the PR process.
+
+---
+
+## Security
+
+To report a vulnerability, **do not open a public issue** — email **hello@tym.wtf** instead. See [SECURITY.md](SECURITY.md) for the full policy.
 
 ---
 
