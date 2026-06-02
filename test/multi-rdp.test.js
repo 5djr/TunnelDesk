@@ -10,7 +10,7 @@ const assert = require("node:assert/strict");
 const net = require("node:net");
 const fs = require("node:fs/promises");
 
-const { getFreeLocalPort } = require("../src/main/net-utils");
+const { getFreeLocalPort, pickLoopbackHost } = require("../src/main/net-utils");
 const {
   buildXfreeRdpArgs,
   writeTempRdpFile,
@@ -49,6 +49,31 @@ test("two tunnels active at once receive distinct ports", async () => {
     holder.close();
   }
 });
+
+test("pickLoopbackHost assigns a distinct 127.0.0.x per active tunnel", () => {
+  // First connection gets .1, then the allocator fills the lowest free slot —
+  // this is what gives each Windows tunnel its own TERMSRV/<ip> credential
+  // target so simultaneous RDP logins don't clobber each other.
+  assert.equal(pickLoopbackHost([]), "127.0.0.1");
+  assert.equal(pickLoopbackHost(["127.0.0.1"]), "127.0.0.2");
+  assert.equal(pickLoopbackHost(["127.0.0.1", "127.0.0.2"]), "127.0.0.3");
+  // A freed slot is reused rather than skipped.
+  assert.equal(pickLoopbackHost(["127.0.0.1", "127.0.0.3"]), "127.0.0.2");
+});
+
+test(
+  "getFreeLocalPort can bind a non-default loopback host",
+  {
+    // macOS only configures 127.0.0.1 by default — which is exactly why the
+    // production code keeps macOS on 127.0.0.1 and only uses 127.0.0.2+ on
+    // Windows. So this binding check only applies off-macOS.
+    skip: process.platform === "darwin" ? "127.0.0.2 not configured on macOS" : false,
+  },
+  async () => {
+    const port = await getFreeLocalPort("127.0.0.2");
+    assert.ok(port > 0 && port < 65536);
+  },
+);
 
 test("xfreerdp args target the passed local port (Linux)", () => {
   const argsXf3 = buildXfreeRdpArgs("localhost", 54321, "alice", "secret", "xfreerdp3");

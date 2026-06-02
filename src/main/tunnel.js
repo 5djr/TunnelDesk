@@ -2,7 +2,9 @@ const { spawn } = require("child_process");
 const { shell } = require("electron");
 const { activeConnections, latencyHistory } = require("./state");
 const { sendConnectionLog, updateStatus, safeSend } = require("./messaging");
-const { getFreeLocalPort } = require("./net-utils");
+const { getFreeLocalPort, pickLoopbackHost } = require("./net-utils");
+
+const IS_MAC = process.platform === "darwin";
 
 function isProcessAlive(proc) {
   if (!proc) return false;
@@ -159,24 +161,52 @@ async function startCloudflared(connection, password, cfBinaryPath) {
   const cfBinary =
     cfBinaryPath && cfBinaryPath.trim() ? cfBinaryPath.trim() : "cloudflared";
   const cfAccess = (connection.protocol || "rdp-cf") === "ssh-cf" ? "ssh" : "rdp";
-  // Allocate a unique loopback port for this tunnel so multiple connections
+  // Give every simultaneous tunnel its own loopback IP (127.0.0.1, 127.0.0.2, …)
+  // on Windows and Linux. On Windows this gives each RDP its own TERMSRV/<ip>
+  // saved-credential target (mstsc strips the port, so tunnels sharing one host
+  // would clobber each other's logins); on Linux it keeps each connection's
+  // watcher/stats endpoint unambiguous. macOS only configures 127.0.0.1 by
+  // default, so it stays there and relies on the unique port for isolation.
+  const localHost = IS_MAC
+    ? "127.0.0.1"
+    : pickLoopbackHost(
+        [...activeConnections.values()].map((e) => e.localHost).filter(Boolean),
+      );
+  // Reserve the loopback host synchronously (before the await below) so a
+  // concurrent connect for another tunnel sees it taken and picks a different
+  // IP — otherwise both could share one Windows credential target.
+  activeConnections.set(connection.id, { proc: null, connection, password, localHost });
+  updateStatus(connection.id, "connecting");
+
+  // Allocate a unique loopback port on that host so multiple connections
   // (e.g. two RDP hosts both configured for 3389) never fight over one port.
-  const localPort = await getFreeLocalPort();
+  let localPort;
+  try {
+    localPort = await getFreeLocalPort(localHost);
+  } catch (err) {
+    activeConnections.delete(connection.id); // release the reservation on failure
+    throw err;
+  }
+
+  // stopConnection may have removed the reservation while we awaited the port.
+  const reserved = activeConnections.get(connection.id);
+  if (!reserved) throw new Error("Connection cancelled");
+
   const args = [
     "access",
     cfAccess,
     "--hostname",
     connection.hostname,
     "--url",
-    `${cfAccess}://localhost:${localPort}`,
+    `${cfAccess}://${localHost}:${localPort}`,
   ];
   const proc = spawn(cfBinary, args, {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  activeConnections.set(connection.id, { proc, connection, password, localPort });
-  updateStatus(connection.id, "connecting");
+  reserved.proc = proc;
+  reserved.localPort = localPort;
 
   proc.on("exit", () => {
     const entry = activeConnections.get(connection.id);
@@ -228,14 +258,15 @@ async function stopConnection(connectionId) {
         );
       }
     }
-    // Remove the Windows credential stored for this tunnel's loopback port.
-    // Each tunnel binds a unique local port, so without this the credentials
-    // would accumulate in Credential Manager across reconnects.
+    // Remove the Windows credential stored for this tunnel's loopback target so
+    // credentials don't accumulate in Credential Manager across reconnects. CF
+    // tunnels bind a per-connection loopback IP; direct RDP uses the real host.
     const proto = active.connection && (active.connection.protocol || "rdp-cf");
     if (proto === "rdp-cf" || proto === "rdp") {
       try {
         const { deleteStoredCredential } = require("./rdp");
-        deleteStoredCredential(active.localPort ?? active.connection.port);
+        const host = active.localHost ?? active.connection.hostname;
+        deleteStoredCredential(host, active.localPort ?? active.connection.port);
       } catch {}
     }
   }

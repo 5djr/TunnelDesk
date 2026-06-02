@@ -50,12 +50,12 @@ async function resolveConnection(connectionId) {
 
 function buildConnectConfig(connection, password, keyPassphrase) {
   const isCf = connection.protocol === "ssh-cf";
-  // For CF tunnels, ssh2 must connect to the dynamically allocated loopback port
+  // For CF tunnels, ssh2 must connect to the per-connection loopback host:port
   // that cloudflared is listening on (see tunnel.js), not the configured port.
-  const cfLocalPort = isCf ? activeConnections.get(connection.id)?.localPort : undefined;
+  const cfEntry = isCf ? activeConnections.get(connection.id) : undefined;
   const cfg = {
-    host: isCf ? "127.0.0.1" : connection.hostname,
-    port: cfLocalPort || connection.port || 22,
+    host: isCf ? cfEntry?.localHost || "127.0.0.1" : connection.hostname,
+    port: cfEntry?.localPort || connection.port || 22,
     username:
       (connection.username && connection.username.trim()) || os.userInfo().username,
     readyTimeout: 30000,

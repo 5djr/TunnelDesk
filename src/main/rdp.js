@@ -83,7 +83,8 @@ async function findRdpBinary() {
 
 const rdpWatchers = new Map();
 
-function checkRdpActive(port) {
+function checkRdpActive(host, port) {
+  const escHost = host.replace(/\./g, "\\.");
   return new Promise((resolve) => {
     let proc;
     if (IS_WIN) {
@@ -109,14 +110,14 @@ function checkRdpActive(port) {
     proc.on("close", () => {
       let found = false;
       if (IS_WIN) {
-        const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
+        const portRe = new RegExp(`${escHost}:${port}(?!\\d)`);
         found = out.split("\n").some((l) => portRe.test(l) && l.includes("ESTABLISHED"));
       } else if (IS_MAC) {
         // lsof with -n -P shows "ESTABLISHED" in the NAME column for active connections.
         const portRe = new RegExp(`:${port}(?:\\s|->|$)`);
         found = out.split("\n").some((l) => portRe.test(l) && l.includes("ESTABLISHED"));
       } else {
-        const portRe = new RegExp(`127\\.0\\.0\\.1:${port}(?!\\d)`);
+        const portRe = new RegExp(`${escHost}:${port}(?!\\d)`);
         found = out.split("\n").some((l) => portRe.test(l));
       }
       resolve(found);
@@ -133,7 +134,7 @@ function stopRdpWatcher(connectionId) {
   }
 }
 
-function startRdpWatcher(connectionId, port) {
+function startRdpWatcher(connectionId, host, port) {
   stopRdpWatcher(connectionId);
 
   const poll = async () => {
@@ -152,7 +153,7 @@ function startRdpWatcher(connectionId, port) {
       return;
     }
 
-    const isActive = await checkRdpActive(port);
+    const isActive = await checkRdpActive(host, port);
 
     const e = activeConnections.get(connectionId);
     if (!e) {
@@ -206,10 +207,13 @@ function runCmdkey(args) {
   });
 }
 
-async function storeCredential(port, username, password) {
+// Store the RDP credential under both the port-specific and port-less TERMSRV
+// targets, because mstsc strips the port when looking up saved credentials for
+// some Windows versions but not others. Each CF tunnel uses a unique loopback
+// host, so the port-less target never collides across simultaneous connections.
+async function storeCredential(host, port, username, password) {
   if (!IS_WIN) return;
-  const targets = [`TERMSRV/localhost:${port}`];
-  if (port === 3389) targets.push("TERMSRV/localhost");
+  const targets = [`TERMSRV/${host}`, `TERMSRV/${host}:${port}`];
   for (const target of targets) {
     await runCmdkey([`/delete:${target}`]);
     await runCmdkey([`/add:${target}`, `/user:${username}`, `/pass:${password}`]);
@@ -218,13 +222,13 @@ async function storeCredential(port, username, password) {
 
 // ─── RDP exit handler (shared between platforms) ──────────────────────────────
 
-function onRdpExit(connectionId, port) {
+function onRdpExit(connectionId, host, port) {
   const entry = activeConnections.get(connectionId);
   if (entry) entry.rdpOpen = false;
   const cfAlive = entry && entry.proc && entry.proc.exitCode === null;
   if (cfAlive) {
     safeSend("rdp-closed", { id: connectionId });
-    startRdpWatcher(connectionId, port);
+    startRdpWatcher(connectionId, host, port);
   } else {
     activeConnections.delete(connectionId);
     updateStatus(connectionId, "disconnected");
@@ -233,13 +237,13 @@ function onRdpExit(connectionId, port) {
 
 // ─── RDP launch (via Cloudflare tunnel) ──────────────────────────────────────
 
-async function launchRemoteDesktop(port, connectionId, username, password) {
+async function launchRemoteDesktop(host, port, connectionId, username, password) {
   stopRdpWatcher(connectionId);
 
   if (IS_WIN) {
-    if (username && password) await storeCredential(port, username, password);
+    if (username && password) await storeCredential(host, port, username, password);
 
-    const mstsc = spawn("mstsc", [`/v:localhost:${port}`], {
+    const mstsc = spawn("mstsc", [`/v:${host}:${port}`], {
       stdio: "ignore",
     });
     const active = activeConnections.get(connectionId);
@@ -248,7 +252,7 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
       active.rdpOpen = true;
     }
 
-    mstsc.on("exit", () => onRdpExit(connectionId, port));
+    mstsc.on("exit", () => onRdpExit(connectionId, host, port));
     mstsc.on("error", () => {
       sendConnectionLog(
         connectionId,
@@ -258,7 +262,7 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
   } else if (IS_MAC) {
     let tmpPath;
     try {
-      tmpPath = await writeTempRdpFile(connectionId, "localhost", port, username);
+      tmpPath = await writeTempRdpFile(connectionId, host, port, username);
     } catch (err) {
       sendConnectionLog(connectionId, `Failed to write RDP file: ${err.message}`);
       safeSend("rdp-closed", { id: connectionId });
@@ -275,7 +279,7 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
     }
 
     const openProc = spawn("open", [tmpPath], { stdio: "ignore" });
-    openProc.on("exit", () => startRdpWatcher(connectionId, port));
+    openProc.on("exit", () => startRdpWatcher(connectionId, host, port));
     openProc.on("error", () => {
       sendConnectionLog(
         connectionId,
@@ -295,7 +299,7 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
       safeSend("rdp-closed", { id: connectionId });
       return;
     }
-    const args = buildXfreeRdpArgs("localhost", port, username, password, rdpBin);
+    const args = buildXfreeRdpArgs(host, port, username, password, rdpBin);
     const rdpProc = spawn(rdpBin, args, { stdio: "ignore" });
     const active = activeConnections.get(connectionId);
     if (active) {
@@ -303,7 +307,7 @@ async function launchRemoteDesktop(port, connectionId, username, password) {
       active.rdpOpen = true;
     }
 
-    rdpProc.on("exit", () => onRdpExit(connectionId, port));
+    rdpProc.on("exit", () => onRdpExit(connectionId, host, port));
     rdpProc.on("error", () => {
       sendConnectionLog(
         connectionId,
@@ -319,7 +323,7 @@ async function launchRemoteDesktopDirect(connection, password) {
   const { id: connectionId, hostname, port, username } = connection;
 
   if (IS_WIN && username && password) {
-    await storeCredential(port, username, password);
+    await storeCredential(hostname, port, username, password);
   }
 
   updateStatus(connectionId, "connecting");
@@ -516,11 +520,10 @@ async function launchTelnetClient(hostname, port, connectionId) {
 
 // ─── Cleanup on quit ─────────────────────────────────────────────────────────
 
-function deleteStoredCredential(port) {
+function deleteStoredCredential(host, port) {
   if (!IS_WIN) return;
   const { spawnSync } = require("child_process");
-  const targets = [`TERMSRV/localhost:${port}`];
-  if (port === 3389) targets.push("TERMSRV/localhost");
+  const targets = [`TERMSRV/${host}`, `TERMSRV/${host}:${port}`];
   for (const target of targets) {
     try {
       spawnSync("cmdkey", [`/delete:${target}`], { windowsHide: true, stdio: "ignore" });

@@ -73,7 +73,8 @@ app.on("before-quit", () => {
     if (proto === "rdp-cf" || proto === "rdp") {
       try {
         const { deleteStoredCredential } = require("./rdp");
-        deleteStoredCredential(active.localPort ?? active.connection.port);
+        const host = active.localHost ?? active.connection.hostname;
+        deleteStoredCredential(host, active.localPort ?? active.connection.port);
       } catch {}
     }
   }

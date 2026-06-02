@@ -5,6 +5,16 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-06-02
+
+### Fixed
+
+- **"Your password is wrong" on Cloudflare Access RDP (Windows).** After the multi-connection change every CF RDP tunnel bound `localhost:<dynamic-port>`, but Windows `mstsc` strips the port when looking up a saved credential (`TERMSRV/localhost`), so the stored login was never matched. Each CF tunnel now binds a unique loopback IP (127.0.0.1, 127.0.0.2, …) on Windows and Linux, giving every simultaneous RDP its own `TERMSRV/<ip>` credential target. Also corrects a latent bug where direct (non-tunnel) RDP stored its credential under `localhost` instead of the real host.
+
+### Changed
+
+- Cloudflare Access tunnels each bind a unique loopback IP on Windows and Linux (macOS stays on 127.0.0.1 with a unique port). SSH-over-Cloudflare-Access was unaffected by the credential bug (ssh2 receives credentials directly) and now also routes through the per-connection loopback endpoint, so multiple simultaneous SSH and RDP tunnels work on every platform.
+
 ## [0.2.8] - 2026-06-02
 
 ### Added

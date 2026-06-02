@@ -1,7 +1,7 @@
 {
   "name": "tunneldesk",
   "productName": "TunnelDesk",
-  "version": "0.2.9",
+  "version": "3.0.0",
   "description": "Cloudflare Zero Trust connection manager for Windows, Linux, and macOS",
   "main": "src/main/index.js",
   "scripts": {
