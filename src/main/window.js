@@ -66,8 +66,8 @@ function createWindow() {
   state.mainWindow = new BrowserWindow({
     width: 900,
     height: 680,
-    minWidth: 760,
-    minHeight: 620,
+    minWidth: 775,
+    minHeight: 645,
     resizable: true,
     show: false,
     backgroundColor: "#1b1b1b",

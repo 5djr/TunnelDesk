@@ -101,6 +101,7 @@ interface Settings {
   entraTenantId: string;
   configSyncUrl: string;
   configSyncInterval: number;
+  reduceGpuUsage: boolean;
 }
 
 type TermTabType = "term" | "sftp";
@@ -277,6 +278,7 @@ let selectedId: string | null = null;
 let debugMode = false;
 let debugPollTimer: ReturnType<typeof setTimeout> | null = null;
 let debugPollRunning = false;
+let uptimeTickTimer: ReturnType<typeof setInterval> | null = null;
 let settingsView = false;
 let searchQuery = "";
 const collapsedGroups = new Set<string>();
@@ -1031,6 +1033,30 @@ function stopDebugPoll() {
   }
 }
 
+function stopUptimeTick() {
+  if (uptimeTickTimer !== null) {
+    clearInterval(uptimeTickTimer);
+    uptimeTickTimer = null;
+  }
+}
+
+function startUptimeTick(connId: string) {
+  stopUptimeTick();
+  uptimeTickTimer = setInterval(() => {
+    const chip = document.getElementById(`uptime-chip-${connId}`);
+    const startedAt = sessionConnectedAt.get(connId);
+    if (!chip || !startedAt) {
+      stopUptimeTick();
+      return;
+    }
+    const label = formatUptime(Math.floor((Date.now() - startedAt) / 1000));
+    chip.textContent = label;
+    // Keep the Debug panel's Uptime row smooth between latency polls.
+    const debugUptime = document.getElementById("debug-uptime-val");
+    if (debugUptime) debugUptime.textContent = label;
+  }, 1000);
+}
+
 function startDebugPoll(connId: string) {
   stopDebugPoll();
   if (getStatus(connId) !== "connected") return;
@@ -1038,7 +1064,7 @@ function startDebugPoll(connId: string) {
   const tick = async () => {
     if (!debugPollRunning) return;
     await updateDebugStats(connId);
-    if (debugPollRunning) debugPollTimer = setTimeout(tick, 2000);
+    if (debugPollRunning) debugPollTimer = setTimeout(tick, 1000);
   };
   void tick();
 }
@@ -1114,17 +1140,14 @@ async function updateDebugStats(connId: string) {
     }
     setLiveIndicator(liveText, liveState);
 
-    const row = (key: string, val: string, cls = "") =>
+    const row = (key: string, val: string, cls = "", id = "") =>
       `<div class="debug-row">
         <span class="debug-key">${escapeHtml(key)}</span>
-        <span class="debug-val${cls ? ` ${cls}` : ""}">${val}</span>
+        <span class="debug-val${cls ? ` ${cls}` : ""}"${id ? ` id="${id}"` : ""}>${val}</span>
       </div>`;
-    const section = (label: string) =>
-      `<div class="debug-section">${escapeHtml(label)}</div>`;
     const dim = (v: string) => `<span class="debug-val--dim">${v}</span>`;
 
     const connSection = [
-      section("Connection"),
       row("Tunnel", escapeHtml(conn ? conn.friendlyName || conn.hostname : "—")),
       row("Protocol", escapeHtml(protocolLabel(proto))),
       row(isCfTunnel ? "Tunnel bind" : "Endpoint", escapeHtml(s.localEndpoint)),
@@ -1133,13 +1156,16 @@ async function updateDebugStats(connId: string) {
     ].join("");
 
     const sessionSection = [
-      section("Session"),
       row("Connected at", formatAbsTime(s.connectedAt)),
-      row("Uptime", s.uptime !== null ? formatUptime(s.uptime) : "—"),
+      row(
+        "Uptime",
+        s.uptime !== null ? formatUptime(s.uptime) : "—",
+        "",
+        "debug-uptime-val",
+      ),
     ].join("");
 
     const rttSection = [
-      section("Network · Round-trip"),
       row("Current", latencyLabel(s.latency), latencyClass(s.latency)),
       row("Min", s.latencyMin !== null ? `${s.latencyMin} ms` : "—"),
       row("Max", s.latencyMax !== null ? `${s.latencyMax} ms` : "—"),
@@ -1150,7 +1176,6 @@ async function updateDebugStats(connId: string) {
 
     const cfSection = isCfTunnel
       ? [
-          section("Cloudflared"),
           row(
             "Status",
             s.alive ? "running" : "dead",
@@ -1167,7 +1192,6 @@ async function updateDebugStats(connId: string) {
 
     const rdpSection = isRdpProto
       ? [
-          section("RDP Client"),
           isRdpCf
             ? row(
                 "Window",
@@ -1188,7 +1212,6 @@ async function updateDebugStats(connId: string) {
           .join("")
       : row("IP", dim("none detected"));
     const systemSection = [
-      section("System"),
       row("OS", escapeHtml(s.systemOs)),
       row("Hostname", escapeHtml(s.systemHostname)),
       ipRows,
@@ -1390,8 +1413,11 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
       fontFamily: '"Cascadia Code", "Consolas", "Monaco", monospace',
       fontSize: tab.fontSize,
       lineHeight: 1.25,
-      cursorBlink: true,
-      scrollback: 5000,
+      // A blinking cursor forces a continuous repaint even when idle — disabled
+      // to keep idle GPU/CPU usage near zero on low-end machines.
+      cursorBlink: false,
+      // Lower scrollback caps per-terminal memory on low-end PCs.
+      scrollback: 2000,
       allowProposedApi: true,
     });
     const fitAddon = new FitAddon();
@@ -3031,11 +3057,11 @@ function renderDetail() {
     ${
       debugMode
         ? `
+    <div class="debug-header">
+      <div class="prop-section-label">Debug</div>
+      <span class="${isConnected ? (rdpClosed.has(conn.id) ? "debug-live debug-live--warn" : "debug-live") : "debug-live debug-live--dim"}" id="debug-live-indicator">&#9679; ${isConnected ? (rdpClosed.has(conn.id) ? "rdp closed" : "polling") : "not connected"}</span>
+    </div>
     <div class="debug-panel">
-      <div class="debug-header">
-        <span class="debug-title">Tunnel Stats</span>
-        <span class="${isConnected ? (rdpClosed.has(conn.id) ? "debug-live debug-live--warn" : "debug-live") : "debug-live debug-live--dim"}" id="debug-live-indicator">&#9679; ${isConnected ? (rdpClosed.has(conn.id) ? "rdp closed" : "polling") : "not connected"}</span>
-      </div>
       <div class="debug-stats" id="debug-stats">
         <div class="debug-loading">Fetching stats&hellip;</div>
       </div>
@@ -3054,6 +3080,12 @@ function renderDetail() {
     startDebugPoll(conn.id);
   } else {
     stopDebugPoll();
+  }
+
+  if (uptimeMs) {
+    startUptimeTick(conn.id);
+  } else {
+    stopUptimeTick();
   }
 }
 
@@ -3300,6 +3332,16 @@ function renderSettingsPanel() {
           </div>
           <label class="toggle">
             <input type="checkbox" id="s-auto-reconnect" ${(s.autoReconnect ?? true) ? "checked" : ""}>
+            <span class="toggle-track"></span>
+          </label>
+        </div>
+        <div class="settings-row">
+          <div class="settings-row-label">
+            <span class="settings-label">Reduce GPU usage</span>
+            <span class="settings-desc">Disables hardware acceleration to lower memory and GPU load on low-end PCs. Requires a restart to take effect.</span>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="s-reduce-gpu" ${s.reduceGpuUsage ? "checked" : ""}>
             <span class="toggle-track"></span>
           </label>
         </div>
@@ -3558,6 +3600,9 @@ function renderSettingsPanel() {
         | "system") ?? "dark";
     const autoReconnect =
       (document.getElementById("s-auto-reconnect") as HTMLInputElement)?.checked ?? true;
+    const reduceGpuUsage =
+      (document.getElementById("s-reduce-gpu") as HTMLInputElement)?.checked ?? false;
+    const gpuChanged = reduceGpuUsage !== (currentSettings?.reduceGpuUsage ?? false);
     const osCacheDurationHours =
       Number((document.getElementById("s-os-cache") as HTMLSelectElement)?.value) || 6;
     const entraClientId = clientIdLocked
@@ -3591,9 +3636,15 @@ function renderSettingsPanel() {
         entraTenantId,
         configSyncUrl,
         configSyncInterval,
+        reduceGpuUsage,
       });
       applyTheme(theme);
-      showToast("Settings saved.", "success");
+      showToast(
+        gpuChanged
+          ? "Settings saved. Restart TunnelDesk to apply the GPU change."
+          : "Settings saved.",
+        "success",
+      );
     } catch {
       showToast("Failed to save settings.", "error");
     }
@@ -4104,6 +4155,23 @@ if (!IS_TERMINAL_WINDOW) {
     appendLog(`RDP reconnected via tunnel — ${connName(data.id)}`);
     renderSidebar();
     if (data.id === selectedId) renderDetail();
+  });
+
+  // Power saving: when the window is hidden (minimized / sent to tray), suspend
+  // the per-second debug poll and its TCP latency probe plus the uptime ticker.
+  // Resume — with an immediate refresh — when the window becomes visible again.
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      stopDebugPoll();
+      stopUptimeTick();
+      return;
+    }
+    if (selectedId && sessionConnectedAt.has(selectedId)) {
+      startUptimeTick(selectedId);
+    }
+    if (selectedId && debugMode && getStatus(selectedId) === "connected") {
+      startDebugPoll(selectedId);
+    }
   });
 }
 

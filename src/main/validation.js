@@ -22,6 +22,10 @@ function sanitizeHostname(value) {
   // and % (IPv6 zone IDs like [fe80::1%eth0]).
   // Reject shell metacharacters on Windows (& | ^ ; ` " ' etc.).
   if (/[^a-zA-Z0-9.\-:[\]_%]/.test(s)) return "";
+  // Reject a leading hyphen so the value can never be parsed as a CLI flag when
+  // passed to an external client (e.g. ssh's `-oProxyCommand=...`). RFC 1123
+  // hostnames and IP/IPv6 literals never legitimately begin with '-'.
+  if (s.startsWith("-")) return "";
   return s;
 }
 
@@ -30,6 +34,8 @@ function sanitizeUsername(value) {
   if (!s || s.length > 256) return undefined;
   // Reject control chars and Windows shell metacharacters.
   if (/[\x00-\x1f&|^;"'`<>]/.test(s)) return undefined;
+  // Reject a leading hyphen — same argument-injection defense as hostnames.
+  if (s.startsWith("-")) return undefined;
   return s;
 }
 

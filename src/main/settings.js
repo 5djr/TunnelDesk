@@ -21,6 +21,7 @@ const DEFAULTS = {
   entraTenantId: "common",
   configSyncUrl: "",
   configSyncInterval: 300,
+  reduceGpuUsage: false,
 };
 
 const VALID_PROTOCOLS = new Set([
@@ -144,13 +145,37 @@ async function writeSettings(partial) {
       Math.min(86400, Math.floor(partial.configSyncInterval)),
     );
   }
+  if (typeof partial.reduceGpuUsage === "boolean") {
+    safe.reduceGpuUsage = partial.reduceGpuUsage;
+  }
   const merged = { ...current, ...safe };
   const file = settingsPath();
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await fs.writeFile(tmp, encryptFile(JSON.stringify(merged, null, 2)), "utf8");
+  // mode 0600: readable only by the owning user (rename preserves the mode).
+  await fs.writeFile(tmp, encryptFile(JSON.stringify(merged, null, 2)), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await fs.rename(tmp, file);
   _cache = merged;
+  // Mirror the GPU preference to a plain sidecar file. settings.json is
+  // DPAPI-encrypted and can only be read after app.ready, but
+  // app.disableHardwareAcceleration() must run *before* ready — so the startup
+  // path reads this unencrypted flag synchronously instead.
+  try {
+    if (merged.reduceGpuUsage) {
+      await fs.writeFile(gpuFlagPath(), "1", "utf8");
+    } else {
+      await fs.rm(gpuFlagPath(), { force: true });
+    }
+  } catch {
+    // Non-critical: the toggle still persists in settings.json.
+  }
   return merged;
 }
 
-module.exports = { DEFAULTS, readSettings, writeSettings };
+function gpuFlagPath() {
+  return path.join(state.userDataPath, "reduce-gpu.flag");
+}
+
+module.exports = { DEFAULTS, readSettings, writeSettings, gpuFlagPath };

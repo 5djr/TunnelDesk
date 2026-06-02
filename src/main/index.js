@@ -24,6 +24,21 @@ app.commandLine.appendSwitch(
 );
 app.commandLine.appendSwitch("js-flags", "--max-old-space-size=64");
 
+// Optional "Reduce GPU usage" mode (user setting). Disabling hardware
+// acceleration removes the GPU process entirely — lower RAM and near-zero GPU
+// usage on low-end / integrated-GPU machines. Must be decided before app.ready,
+// so we read an unencrypted sidecar flag synchronously (see settings.js).
+try {
+  const fsSync = require("fs");
+  const pathSync = require("path");
+  const flag = pathSync.join(app.getPath("userData"), "reduce-gpu.flag");
+  if (fsSync.existsSync(flag)) {
+    app.disableHardwareAcceleration();
+  }
+} catch {
+  // Non-critical: fall back to hardware acceleration enabled.
+}
+
 // ─── Global error traps ───────────────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
   console.error("[TunnelDesk] Uncaught exception:", err);

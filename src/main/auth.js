@@ -23,7 +23,8 @@ async function saveTokenCache(pca) {
   try {
     const json = pca.getTokenCache().serialize();
     const encrypted = safeStorage.encryptString(json);
-    await fs.writeFile(tokenCachePath(), encrypted);
+    // mode 0600: the OAuth token cache is owner-readable only.
+    await fs.writeFile(tokenCachePath(), encrypted, { mode: 0o600 });
   } catch {}
 }
 

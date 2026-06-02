@@ -81,6 +81,9 @@ function normalize(raw) {
 }
 
 function readPolicy() {
+  // Windows reads the registry; Linux and macOS share the Unix file reader
+  // (/etc/tunneldesk/policy.json). On an unmanaged machine this returns {} and
+  // the app runs with no enforced policy — the normal standalone experience.
   const raw = process.platform === "win32" ? readWindowsPolicy() : readLinuxPolicy();
   cached = normalize(raw);
   return cached;

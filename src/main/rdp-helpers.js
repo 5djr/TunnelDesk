@@ -36,7 +36,12 @@ async function writeTempRdpFile(connectionId, host, port, username) {
     "prompt for credentials:i:1",
     "enablecredsspsupport:i:1",
   ].filter(Boolean);
-  await fsP.writeFile(tmpPath, lines.join("\r\n") + "\r\n", "utf8");
+  // mode 0600: the .rdp file lives in the shared temp dir, so keep it
+  // owner-readable only (it carries the host/username, no password).
+  await fsP.writeFile(tmpPath, lines.join("\r\n") + "\r\n", {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   return tmpPath;
 }
 

@@ -35,7 +35,11 @@ async function readConnections() {
 async function writeConnections(connections) {
   const file = configPath();
   const tmp = `${file}.tmp.${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  await fs.writeFile(tmp, encryptFile(JSON.stringify(connections, null, 2)), "utf8");
+  // mode 0600: readable only by the owning user (rename preserves the mode).
+  await fs.writeFile(tmp, encryptFile(JSON.stringify(connections, null, 2)), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await fs.rename(tmp, file);
   _cache = connections;
 }

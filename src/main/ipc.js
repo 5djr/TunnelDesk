@@ -494,7 +494,9 @@ function registerIpcHandlers() {
   ipcMain.handle("sftp-download", async (event, { sid, remotePath }) => {
     const { BrowserWindow } = require("electron");
     const win = BrowserWindow.fromWebContents(event.sender) || state.mainWindow;
-    const filename = remotePath.split("/").pop() || "file";
+    // Derive the suggested filename safely: coerce to string and strip any
+    // directory components a malicious server listing may embed in the name.
+    const filename = path.basename(String(remotePath).split("/").pop() || "file");
     const settings = await readSettings();
     const defaultPath = settings.sftpDownloadFolder
       ? path.join(settings.sftpDownloadFolder, filename)
@@ -590,8 +592,18 @@ function registerIpcHandlers() {
     return sftpMkdir(toId(sid), remotePath);
   });
 
-  // Direct upload from a known local path (used by drag-and-drop).
+  // Direct upload from a known local path (used by drag-and-drop). The path is
+  // renderer-supplied, so validate it points at a real regular file before
+  // reading it — this prevents a compromised renderer from exfiltrating
+  // arbitrary local files (keys, config) to a connected SSH host.
   ipcMain.handle("sftp-upload-path", async (_event, { sid, localPath, remotePath }) => {
+    if (typeof localPath !== "string" || localPath.includes("\x00")) {
+      throw new Error("Invalid local path");
+    }
+    const stat = await require("fs").promises.stat(localPath);
+    if (!stat.isFile()) {
+      throw new Error("Only regular files can be uploaded");
+    }
     await sftpUpload(toId(sid), localPath, remotePath);
     return { dest: remotePath };
   });

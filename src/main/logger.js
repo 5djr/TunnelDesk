@@ -22,7 +22,11 @@ function logFilePath(n = 0) {
 
 function openWriteStream() {
   try {
-    writeStream = fs.createWriteStream(logFilePath(), { flags: "a", encoding: "utf8" });
+    writeStream = fs.createWriteStream(logFilePath(), {
+      flags: "a",
+      encoding: "utf8",
+      mode: 0o600,
+    });
   } catch {}
 }
 
