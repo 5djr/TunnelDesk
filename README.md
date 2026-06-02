@@ -2,7 +2,7 @@
 
 > Cloudflare Zero Trust connection manager for Windows, Linux, and macOS
 
-[![Version](https://img.shields.io/badge/version-0.2.6-blue.svg)](https://github.com/5djr/TunnelDesk/releases)
+[![Version](https://img.shields.io/badge/version-3.0.0-blue.svg)](https://github.com/5djr/TunnelDesk/releases)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)](#platform-support)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
