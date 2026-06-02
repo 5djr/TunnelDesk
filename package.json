@@ -6,6 +6,7 @@
   "main": "src/main/index.js",
   "scripts": {
     "start": "electron .",
+    "test": "node --test",
     "build:renderer": "vite build",
     "dev": "npm run build:renderer && electron .",
     "dist": "npm run build:renderer && electron-builder --win --x64",

@@ -5,6 +5,14 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Connection details **Endpoint** for Cloudflare Access tunnels now shows the Cloudflare hostname instead of a stale `localhost:<configured-port>` that no longer matched the dynamically-allocated local port (shown as "Tunnel bind" in stats).
+
+### Added
+
+- Cross-platform unit tests (`npm test`, Node's built-in test runner — no install required) covering dynamic local-port allocation and the RDP launch helpers; a GitHub Actions Test workflow runs them on Ubuntu, macOS, and Windows for every push and pull request.
+
 ## [0.2.7] - 2026-06-02
 
 ### Fixed

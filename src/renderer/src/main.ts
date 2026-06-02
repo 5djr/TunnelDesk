@@ -888,7 +888,9 @@ function isSshProtocol(p: string): boolean {
 
 function localEndpoint(conn: Connection): string {
   const isCf = conn.protocol === "rdp-cf" || conn.protocol === "ssh-cf";
-  return isCf ? `localhost:${conn.port}` : `${conn.hostname}:${conn.port}`;
+  // CF tunnels bind a dynamic local port; the meaningful endpoint is the
+  // Cloudflare hostname (the local bind is surfaced separately as "Tunnel bind").
+  return isCf ? conn.hostname : `${conn.hostname}:${conn.port}`;
 }
 
 // Show/hide the SSH key and jump host fields based on selected protocol.
@@ -2894,7 +2896,11 @@ function renderDetail() {
   const isRdpCf = proto === "rdp-cf";
   const rdpIsDown = isConnected && rdpClosed.has(conn.id) && isRdpCf;
   const isCf = proto === "rdp-cf" || proto === "ssh-cf";
-  const endpoint = isCf ? `localhost:${conn.port}` : `${conn.hostname}:${conn.port}`;
+  // For Cloudflare Access tunnels the local listener uses a dynamically
+  // allocated port (shown live as "Tunnel bind" in stats), so the Endpoint row
+  // shows the Cloudflare hostname you connect through rather than a stale local
+  // port. Direct connections still show host:port.
+  const endpoint = isCf ? conn.hostname : `${conn.hostname}:${conn.port}`;
   const authUrl = isConnecting ? authPendingUrls.get(conn.id) : undefined;
 
   const svgPlay = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>`;

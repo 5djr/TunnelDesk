@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      # The unit tests exercise only dependency-free leaf modules (net-utils,
+      # rdp-helpers) via Node's built-in test runner, so no `npm install` is
+      # needed. This keeps the cross-platform matrix fast.
+      - name: Run tests
+        run: npm test

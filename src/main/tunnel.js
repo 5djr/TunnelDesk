@@ -1,24 +1,8 @@
 const { spawn } = require("child_process");
-const net = require("net");
 const { shell } = require("electron");
 const { activeConnections, latencyHistory } = require("./state");
 const { sendConnectionLog, updateStatus, safeSend } = require("./messaging");
-
-// Ask the OS for an unused TCP port on the loopback interface. Each Cloudflare
-// Access tunnel binds its own local listener, so two connections that share the
-// same configured port (e.g. RDP's default 3389) would otherwise collide on
-// 127.0.0.1:3389. Binding to port 0 lets the kernel hand back a free port.
-function getFreeLocalPort() {
-  return new Promise((resolve, reject) => {
-    const srv = net.createServer();
-    srv.unref();
-    srv.on("error", reject);
-    srv.listen(0, "127.0.0.1", () => {
-      const { port } = srv.address();
-      srv.close(() => resolve(port));
-    });
-  });
-}
+const { getFreeLocalPort } = require("./net-utils");
 
 function isProcessAlive(proc) {
   if (!proc) return false;

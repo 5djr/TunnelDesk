@@ -2,12 +2,15 @@
 
 const fs = require("fs");
 const { promises: fsP } = require("fs");
-const os = require("os");
-const path = require("path");
 const { spawn } = require("child_process");
 const { shell } = require("electron");
 const { activeConnections } = require("./state");
 const { safeSend, sendConnectionLog, updateStatus } = require("./messaging");
+const {
+  buildXfreeRdpArgs,
+  writeTempRdpFile,
+  cleanupTempRdpFile,
+} = require("./rdp-helpers");
 
 const IS_WIN = process.platform === "win32";
 const IS_MAC = process.platform === "darwin";
@@ -74,40 +77,6 @@ async function findRdpBinary() {
   }
   _rdpBinaryCache = null;
   return null;
-}
-
-function buildXfreeRdpArgs(host, port, username, password, binary) {
-  const certFlag = binary === "xfreerdp" ? "/cert-ignore" : "/cert:ignore";
-  const args = [`/v:${host}:${port}`, certFlag, "/dynamic-resolution", "+clipboard"];
-  if (username) args.push(`/u:${username}`);
-  // Password passed as argument to xfreerdp — visible in process list (xfreerdp limitation).
-  if (password) args.push(`/p:${password}`);
-  return args;
-}
-
-// ─── macOS helpers ────────────────────────────────────────────────────────────
-
-// Write a .rdp file to a temp path and open it with the default handler
-// (Microsoft Remote Desktop from the App Store, or any registered handler).
-async function writeTempRdpFile(connectionId, host, port, username) {
-  const tmpPath = path.join(os.tmpdir(), `tunneldesk-${connectionId}-${Date.now()}.rdp`);
-  const lines = [
-    "screen mode id:i:2",
-    `full address:s:${host}:${port}`,
-    username ? `username:s:${username}` : null,
-    "audiomode:i:0",
-    "autoreconnection enabled:i:1",
-    "authentication level:i:2",
-    "negotiate security layer:i:1",
-    "prompt for credentials:i:1",
-    "enablecredsspsupport:i:1",
-  ].filter(Boolean);
-  await fsP.writeFile(tmpPath, lines.join("\r\n") + "\r\n", "utf8");
-  return tmpPath;
-}
-
-function cleanupTempRdpFile(tmpPath, delayMs = 8000) {
-  setTimeout(() => fsP.unlink(tmpPath).catch(() => {}), delayMs);
 }
 
 // ─── External RDP watcher ─────────────────────────────────────────────────────
