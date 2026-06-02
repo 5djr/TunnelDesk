@@ -159,7 +159,15 @@ function createTermSession(connectionId, cfg, onData, onClose, onOsDetected) {
       untrackPending(connectionId, client);
       // Kick off OS detection now — resolves independently of the shell.
       const osPromise = detectOsInfo(client);
-      client.shell({ term: "xterm-256color", cols: 80, rows: 24 }, (err, stream) => {
+      // COLORTERM=truecolor lets full-screen TUIs (btop, htop) render 24-bit
+      // gradients instead of falling back to 256 colors. ssh2 sends env as a
+      // best-effort request (wantReply:false), so a server that doesn't
+      // AcceptEnv it simply ignores it — the shell still opens. The renderer's
+      // xterm is created at the real size right after; the PTY is resized to
+      // match via onResize before any interactive command (pm2 logs / btop) runs.
+      const shellWindow = { term: "xterm-256color", cols: 80, rows: 24 };
+      const shellOpts = { env: { COLORTERM: "truecolor" } };
+      client.shell(shellWindow, shellOpts, (err, stream) => {
         if (err) {
           try {
             client.destroy();
