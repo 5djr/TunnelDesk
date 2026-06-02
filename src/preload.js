@@ -59,6 +59,15 @@ contextBridge.exposeInMainWorld("api", {
     ipcRenderer.invoke("telnet-resize", { sid, cols, rows }),
   telnetCloseSession: (sid) => ipcRenderer.invoke("telnet-close-session", sid),
 
+  // ─── Serial terminal ───────────────────────────────────────────────────────
+  serialListPorts: () => ipcRenderer.invoke("serial-list-ports"),
+  serialTermCreate: (connectionId) =>
+    ipcRenderer.invoke("serial-term-create", connectionId),
+  serialWrite: (sid, data) => ipcRenderer.invoke("serial-write", { sid, data }),
+  serialResize: (sid, cols, rows) =>
+    ipcRenderer.invoke("serial-resize", { sid, cols, rows }),
+  serialCloseSession: (sid) => ipcRenderer.invoke("serial-close-session", sid),
+
   // ─── SSH terminal ────────────────────────────────────────────────────────
   sshTermCreate: (connectionId) => ipcRenderer.invoke("ssh-term-create", connectionId),
   sshSftpCreate: (connectionId) => ipcRenderer.invoke("ssh-sftp-create", connectionId),

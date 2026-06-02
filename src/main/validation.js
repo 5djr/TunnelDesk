@@ -6,6 +6,7 @@ const PROTOCOL_DEFAULTS = {
   "ssh-cf": 22,
   ssh: 22,
   telnet: 23,
+  serial: 0,
   http: 80,
   https: 443,
 };
@@ -55,6 +56,45 @@ function sanitizePath(value) {
   return s;
 }
 
+// Serial device path: COM3 / \\.\COM23 (Windows) or /dev/ttyUSB0,
+// /dev/tty.usbserial-1420 (Linux/macOS). Not passed to a shell, but reject
+// control chars and shell metacharacters defensively.
+function sanitizeSerialPath(value) {
+  const s = String(value || "").trim();
+  if (!s || s.length > 256) return "";
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f<>|;&^`"'$]/.test(s)) return "";
+  return s;
+}
+
+// Clamp a serial line-settings object to known-good values, applying defaults.
+// Keeps a hand-edited connections.json from feeding bad input to the native
+// serialport binding.
+function sanitizeSerialConfig(value) {
+  const s = value && typeof value === "object" ? value : {};
+  const baud = Number(s.baudRate);
+  const dataBits = Number(s.dataBits);
+  const stopBits = Number(s.stopBits);
+  return {
+    baudRate: Number.isInteger(baud) && baud > 0 && baud <= 4000000 ? baud : 9600,
+    dataBits: [5, 6, 7, 8].includes(dataBits) ? dataBits : 8,
+    stopBits: [1, 1.5, 2].includes(stopBits) ? stopBits : 1,
+    parity: ["none", "even", "odd", "mark", "space"].includes(s.parity)
+      ? s.parity
+      : "none",
+    flowControl: ["none", "rtscts", "xonxoff"].includes(s.flowControl)
+      ? s.flowControl
+      : "none",
+    encoding: ["utf8", "ascii", "latin1", "utf16le"].includes(s.encoding)
+      ? s.encoding
+      : "utf8",
+    dtr: s.dtr !== false,
+    rts: s.rts !== false,
+    localEcho: s.localEcho === true,
+    lineEnding: ["cr", "lf", "crlf", "none"].includes(s.lineEnding) ? s.lineEnding : "cr",
+  };
+}
+
 function sanitizeNotes(value) {
   return String(value || "")
     .trim()
@@ -75,6 +115,8 @@ module.exports = {
   sanitizeUsername,
   sanitizeProtocol,
   sanitizePath,
+  sanitizeSerialPath,
+  sanitizeSerialConfig,
   sanitizeNotes,
   sanitizeGroup,
 };

@@ -8,6 +8,7 @@ const { launchRemoteDesktop, launchRemoteDesktopDirect } = require("./rdp");
 const { sendConnectionLog, updateStatus } = require("./messaging");
 const { closeSessionsForConnection } = require("./ssh-session");
 const { closeTelnetSessionsForConnection } = require("./telnet-session");
+const { closeSerialSessionsForConnection } = require("./serial-session");
 
 async function connectById(connectionId) {
   const connections = await readConnections();
@@ -56,6 +57,16 @@ async function connectById(connectionId) {
     });
     // Status transitions to "connected" / "disconnected" when the terminal
     // window successfully opens the embedded Telnet session (see ssh-report-status).
+  } else if (protocol === "serial") {
+    updateStatus(connection.id, "connecting");
+    activeConnections.set(connection.id, {
+      proc: null,
+      connection,
+      password,
+      connectedAt: null, // set by terminal window via ssh-report-status IPC
+    });
+    // The terminal window opens the embedded serial session and reports back
+    // connected / disconnected via ssh-report-status, just like SSH/Telnet.
   } else if (protocol === "http" || protocol === "https") {
     const url = `${protocol}://${connection.hostname}:${connection.port}`;
     await shell.openExternal(url);
@@ -68,6 +79,7 @@ async function connectById(connectionId) {
 async function disconnectById(connectionId) {
   closeSessionsForConnection(connectionId);
   closeTelnetSessionsForConnection(connectionId);
+  closeSerialSessionsForConnection(connectionId);
   await stopConnection(connectionId);
   return { status: "disconnected" };
 }

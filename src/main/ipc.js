@@ -23,6 +23,13 @@ const {
   telnetCloseSession,
 } = require("./telnet-session");
 const {
+  listSerialPorts,
+  serialCreateTerm,
+  serialWrite,
+  serialResize,
+  serialCloseSession,
+} = require("./serial-session");
+const {
   state,
   activeConnections,
   connectionStatuses,
@@ -40,6 +47,8 @@ const {
   sanitizeUsername,
   sanitizeProtocol,
   sanitizePath,
+  sanitizeSerialPath,
+  sanitizeSerialConfig,
   sanitizeNotes,
   sanitizeGroup,
   PROTOCOL_DEFAULTS,
@@ -83,9 +92,27 @@ function registerIpcHandlers() {
 
   ipcMain.handle("save-connection", async (event, connection) => {
     const connections = await readConnections();
-    const hostname = sanitizeHostname(connection.hostname);
-    if (!hostname) {
-      throw new Error("Hostname is required and must be a valid value");
+    const protocol = sanitizeProtocol(connection.protocol);
+
+    // Serial connections identify the device by a port path (COM3,
+    // /dev/ttyUSB0) rather than a network hostname. Store the path in both
+    // `serialPath` and `hostname` so the renderer's display logic (sidebar,
+    // endpoint row) keeps working unchanged.
+    let hostname;
+    let serialPath;
+    let serial;
+    if (protocol === "serial") {
+      serialPath = sanitizeSerialPath(connection.serialPath || connection.hostname);
+      if (!serialPath) {
+        throw new Error("Serial port is required (e.g. COM3 or /dev/ttyUSB0)");
+      }
+      hostname = serialPath;
+      serial = sanitizeSerialConfig(connection.serial);
+    } else {
+      hostname = sanitizeHostname(connection.hostname);
+      if (!hostname) {
+        throw new Error("Hostname is required and must be a valid value");
+      }
     }
 
     const existing = connections.find((c) => c.id === connection.id);
@@ -122,7 +149,6 @@ function registerIpcHandlers() {
       encryptedSshKeyPassphrase = undefined;
     }
 
-    const protocol = sanitizeProtocol(connection.protocol);
     const jumpHost = sanitizeHostname(connection.jumpHost || "");
     const normalized = {
       id: connection.id || `${Date.now()}-${Math.random().toString(16).slice(2)}`,
@@ -140,6 +166,8 @@ function registerIpcHandlers() {
       sshKeyPath: sanitizePath(connection.sshKeyPath),
       jumpHost: jumpHost || undefined,
       jumpPort: jumpHost ? normalizePort(connection.jumpPort || 22) : undefined,
+      serialPath: serialPath || undefined,
+      serial: serial || undefined,
       temp: !!connection.temp,
     };
 
@@ -223,6 +251,8 @@ function registerIpcHandlers() {
     const protocol = connection.protocol || "rdp-cf";
     const isCfTunnel = protocol === "rdp-cf" || protocol === "ssh-cf";
     const isRdpProto = protocol === "rdp-cf" || protocol === "rdp";
+    // Serial has no network endpoint — TCP latency probing is meaningless.
+    const isSerial = protocol === "serial";
 
     const alive = isCfTunnel ? isProcessAlive(proc) : true;
     const pid = proc ? proc.pid : null;
@@ -236,7 +266,7 @@ function registerIpcHandlers() {
       : connection.port;
 
     const [latency, cloudflaredMemBytes, mstscMemBytes] = await Promise.all([
-      alive
+      alive && !isSerial
         ? measureRoundTripLatency(measureHost, localPort, protocol)
         : Promise.resolve(null),
       isCfTunnel ? getProcessMemoryBytes(pid) : Promise.resolve(null),
@@ -277,7 +307,9 @@ function registerIpcHandlers() {
       pid,
       localEndpoint: isCfTunnel
         ? `localhost:${localPort}`
-        : `${connection.hostname}:${connection.port}`,
+        : isSerial
+          ? connection.hostname
+          : `${connection.hostname}:${connection.port}`,
       hostname: connection.hostname,
       protocol,
       alive,
@@ -446,6 +478,40 @@ function registerIpcHandlers() {
     telnetCloseSession(toId(sid));
   });
 
+  // ─── Serial terminal ────────────────────────────────────────────────────────
+  // Reuses the ssh-data / ssh-close renderer events like Telnet — the renderer
+  // routes by sid via the serialSids set.
+
+  ipcMain.handle("serial-list-ports", async () => {
+    try {
+      return await listSerialPorts();
+    } catch (err) {
+      // Surface a structured failure the form can show without throwing.
+      return { error: err instanceof Error ? err.message : String(err) };
+    }
+  });
+
+  ipcMain.handle("serial-term-create", async (_event, connectionId) => {
+    return serialCreateTerm(
+      toId(connectionId),
+      (id, data) =>
+        safeSend("ssh-data", { sid: id, data: Buffer.from(data).toString("base64") }),
+      (id) => safeSend("ssh-close", { sid: id, code: null, signal: null }),
+    );
+  });
+
+  ipcMain.handle("serial-write", (_event, { sid, data }) => {
+    serialWrite(toId(sid), data);
+  });
+
+  ipcMain.handle("serial-resize", (_event, { sid, cols, rows }) => {
+    serialResize(toId(sid), cols, rows);
+  });
+
+  ipcMain.handle("serial-close-session", (_event, sid) => {
+    serialCloseSession(toId(sid));
+  });
+
   // ─── SSH terminal ──────────────────────────────────────────────────────────
 
   ipcMain.handle("ssh-term-create", async (_event, connectionId) => {
@@ -550,8 +616,19 @@ function registerIpcHandlers() {
     const existingIds = new Set(existing.map((c) => c.id));
     let added = 0;
     for (const conn of parsed) {
-      const hostname = sanitizeHostname(conn.hostname);
-      if (!hostname) continue;
+      const protocol = sanitizeProtocol(conn.protocol);
+      let hostname;
+      let serialPath;
+      let serial;
+      if (protocol === "serial") {
+        serialPath = sanitizeSerialPath(conn.serialPath || conn.hostname);
+        if (!serialPath) continue;
+        hostname = serialPath;
+        serial = sanitizeSerialConfig(conn.serial);
+      } else {
+        hostname = sanitizeHostname(conn.hostname);
+        if (!hostname) continue;
+      }
       const id =
         conn.id && typeof conn.id === "string" && !existingIds.has(conn.id)
           ? conn.id
@@ -565,12 +642,14 @@ function registerIpcHandlers() {
         hostname,
         port: normalizePort(conn.port || 3389),
         username: sanitizeUsername(conn.username),
-        protocol: sanitizeProtocol(conn.protocol),
+        protocol,
         notes: sanitizeNotes(conn.notes),
         group: sanitizeGroup(conn.group),
         sshKeyPath: sanitizePath(conn.sshKeyPath),
         jumpHost: jumpHost || undefined,
         jumpPort: jumpHost ? normalizePort(conn.jumpPort || 22) : undefined,
+        serialPath: serialPath || undefined,
+        serial: serial || undefined,
       });
       existingIds.add(id);
       added++;

@@ -88,6 +88,8 @@ function sanitizeForRenderer(conn) {
     hasSshKeyPassphrase: !!conn.encryptedSshKeyPassphrase,
     jumpHost: conn.jumpHost || "",
     jumpPort: conn.jumpPort ? normalizePort(conn.jumpPort) : null,
+    serialPath: conn.serialPath || "",
+    serial: conn.serial || null,
     temp: !!conn.temp,
     managed: !!conn.managed,
   };

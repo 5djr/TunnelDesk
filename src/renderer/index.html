@@ -246,6 +246,7 @@
                 <option value="rdp">RDP (Direct)</option>
                 <option value="ssh">SSH (Direct)</option>
                 <option value="telnet">Telnet</option>
+                <option value="serial">Serial Port</option>
                 <option value="http">HTTP</option>
                 <option value="https">HTTPS</option>
               </optgroup>
@@ -275,7 +276,7 @@
               />
             </div>
           </div>
-          <div class="form-group">
+          <div class="form-group" id="hostname-group">
             <label class="form-label" for="hostname"
               >Hostname <span class="form-required">*</span></label
             >
@@ -287,7 +288,7 @@
               autocomplete="off"
             />
           </div>
-          <div class="form-group">
+          <div class="form-group" id="port-group">
             <label class="form-label" for="port">Port</label>
             <input
               class="form-input"
@@ -298,10 +299,153 @@
               max="65535"
             />
           </div>
-          <div class="form-section-label">
+
+          <!-- Serial port — shown only for the serial protocol -->
+          <div class="form-group" id="serial-port-group" style="display: none">
+            <label class="form-label" for="serial-path"
+              >Serial Port <span class="form-required">*</span></label
+            >
+            <div class="form-file-row">
+              <input
+                class="form-input"
+                type="text"
+                id="serial-path"
+                list="serial-port-list"
+                placeholder="COM3 or /dev/ttyUSB0"
+                autocomplete="off"
+              />
+              <button
+                type="button"
+                class="btn btn-secondary btn-sm"
+                id="serial-refresh"
+                title="Detect connected serial ports"
+              >
+                Refresh
+              </button>
+            </div>
+            <datalist id="serial-port-list"></datalist>
+            <div class="form-hint" id="serial-port-hint"></div>
+          </div>
+
+          <!-- Serial line settings — shown only for the serial protocol -->
+          <div class="form-group" id="serial-advanced-group" style="display: none">
+            <div class="form-section-label">Serial Settings</div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="serial-baud">Baud Rate</label>
+                <input
+                  class="form-input"
+                  type="number"
+                  id="serial-baud"
+                  list="serial-baud-list"
+                  value="9600"
+                  min="1"
+                />
+                <datalist id="serial-baud-list">
+                  <option value="300"></option>
+                  <option value="1200"></option>
+                  <option value="2400"></option>
+                  <option value="4800"></option>
+                  <option value="9600"></option>
+                  <option value="19200"></option>
+                  <option value="38400"></option>
+                  <option value="57600"></option>
+                  <option value="115200"></option>
+                  <option value="230400"></option>
+                  <option value="460800"></option>
+                  <option value="921600"></option>
+                </datalist>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="serial-databits">Data Bits</label>
+                <select class="form-input" id="serial-databits">
+                  <option value="8">8</option>
+                  <option value="7">7</option>
+                  <option value="6">6</option>
+                  <option value="5">5</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="serial-stopbits">Stop Bits</label>
+                <select class="form-input" id="serial-stopbits">
+                  <option value="1">1</option>
+                  <option value="1.5">1.5</option>
+                  <option value="2">2</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="serial-parity">Parity</label>
+                <select class="form-input" id="serial-parity">
+                  <option value="none">None</option>
+                  <option value="even">Even</option>
+                  <option value="odd">Odd</option>
+                  <option value="mark">Mark</option>
+                  <option value="space">Space</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="serial-flow">Flow Control</label>
+                <select class="form-input" id="serial-flow">
+                  <option value="none">None</option>
+                  <option value="rtscts">Hardware (RTS/CTS)</option>
+                  <option value="xonxoff">Software (XON/XOFF)</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label class="form-label" for="serial-encoding">Encoding</label>
+                <select class="form-input" id="serial-encoding">
+                  <option value="utf8">UTF-8</option>
+                  <option value="ascii">ASCII</option>
+                  <option value="latin1">Latin-1 (ISO-8859-1)</option>
+                  <option value="utf16le">UTF-16LE</option>
+                </select>
+              </div>
+            </div>
+            <div class="form-row">
+              <div class="form-group">
+                <label class="form-label" for="serial-lineending">Enter Sends</label>
+                <select class="form-input" id="serial-lineending">
+                  <option value="cr">CR (\r)</option>
+                  <option value="lf">LF (\n)</option>
+                  <option value="crlf">CR + LF (\r\n)</option>
+                  <option value="none">Raw (pass through)</option>
+                </select>
+              </div>
+              <div class="form-group"></div>
+            </div>
+            <div class="serial-check-row">
+              <div class="serial-check">
+                <span class="serial-check-label">Assert DTR on open</span>
+                <label class="toggle">
+                  <input type="checkbox" id="serial-dtr" checked />
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+              <div class="serial-check">
+                <span class="serial-check-label">Assert RTS on open</span>
+                <label class="toggle">
+                  <input type="checkbox" id="serial-rts" checked />
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+              <div class="serial-check">
+                <span class="serial-check-label">Local echo</span>
+                <label class="toggle">
+                  <input type="checkbox" id="serial-localecho" />
+                  <span class="toggle-track"></span>
+                </label>
+              </div>
+            </div>
+          </div>
+
+          <div class="form-section-label" id="credentials-label">
             Credentials <span class="form-optional">optional</span>
           </div>
-          <div class="form-row">
+          <div class="form-row" id="credentials-group">
             <div class="form-group">
               <label class="form-label" for="cred-username">Username</label>
               <input

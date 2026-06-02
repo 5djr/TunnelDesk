@@ -64,8 +64,12 @@ jobs:
       - name: Remove cpu-features (incompatible with Electron 42 V8)
         run: rm -rf node_modules/cpu-features
 
+      # fakeroot/dpkg are needed for the .deb target. libudev-dev is a safety
+      # net only: serialport ships N-API prebuilds (loaded as-is, npmRebuild is
+      # off), so no native compilation happens — but it's cheap insurance if a
+      # future bump ever forces a source rebuild of @serialport/bindings-cpp.
       - name: Install Linux build tools
-        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg
+        run: sudo apt-get update && sudo apt-get install -y fakeroot dpkg libudev-dev
 
       - name: Build renderer
         run: npm run build:renderer

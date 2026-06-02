@@ -5,7 +5,36 @@ import "@xterm/xterm/css/xterm.css";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type Protocol = "rdp-cf" | "rdp" | "ssh-cf" | "ssh" | "telnet" | "http" | "https";
+type Protocol =
+  | "rdp-cf"
+  | "rdp"
+  | "ssh-cf"
+  | "ssh"
+  | "telnet"
+  | "serial"
+  | "http"
+  | "https";
+
+interface SerialConfig {
+  baudRate: number;
+  dataBits: number;
+  stopBits: number;
+  parity: "none" | "even" | "odd" | "mark" | "space";
+  flowControl: "none" | "rtscts" | "xonxoff";
+  encoding: "utf8" | "ascii" | "latin1" | "utf16le";
+  dtr: boolean;
+  rts: boolean;
+  localEcho: boolean;
+  lineEnding: "cr" | "lf" | "crlf" | "none";
+}
+
+interface SerialPortInfo {
+  path: string;
+  manufacturer: string;
+  serialNumber: string;
+  pnpId: string;
+  friendlyName: string;
+}
 
 interface Connection {
   id: string;
@@ -22,6 +51,8 @@ interface Connection {
   hasSshKeyPassphrase: boolean;
   jumpHost: string;
   jumpPort: number | null;
+  serialPath: string;
+  serial: SerialConfig | null;
   temp: boolean;
   managed?: boolean;
 }
@@ -171,6 +202,8 @@ declare global {
         sshKeyPath?: string;
         jumpHost?: string;
         jumpPort?: number | null;
+        serialPath?: string;
+        serial?: SerialConfig;
         temp?: boolean;
       }): Promise<Connection>;
       deleteConnection(id: string): Promise<Connection[]>;
@@ -201,6 +234,11 @@ declare global {
       telnetWrite(sid: string, data: string): Promise<void>;
       telnetResize(sid: string, cols: number, rows: number): Promise<void>;
       telnetCloseSession(sid: string): Promise<void>;
+      serialListPorts(): Promise<SerialPortInfo[] | { error: string }>;
+      serialTermCreate(connectionId: string): Promise<string>;
+      serialWrite(sid: string, data: string): Promise<void>;
+      serialResize(sid: string, cols: number, rows: number): Promise<void>;
+      serialCloseSession(sid: string): Promise<void>;
       sshTermCreate(connectionId: string): Promise<string>;
       onSshOsDetected(cb: (d: { sid: string; osInfo: string }) => void): void;
       sshSftpCreate(connectionId: string): Promise<string>;
@@ -312,9 +350,42 @@ const CONFIRM_MESSAGE = _twParams.get("message") ?? "";
 const termState = new Map<string, ConnTermState>();
 // Reverse map: sessionId → { connId, tabId } for routing ssh-data events.
 const sidToTab = new Map<string, { connId: string; tabId: string }>();
-// Track which sids are Telnet sessions (vs SSH) for routing write/close IPC.
+// Track which sids are Telnet / Serial sessions (vs SSH) for routing write/
+// resize/close IPC. A sid belongs to at most one of these sets.
 const telnetSids = new Set<string>();
+const serialSids = new Set<string>();
 let termTabCounter = 0;
+
+// Route terminal I/O to the correct backend based on which set owns the sid.
+// SSH is the default (sid in neither set).
+function termSessionWrite(sid: string, data: string): void {
+  if (telnetSids.has(sid)) void window.api.telnetWrite(sid, data);
+  else if (serialSids.has(sid)) void window.api.serialWrite(sid, data);
+  else void window.api.sshWrite(sid, data);
+}
+
+function termSessionResize(sid: string, cols: number, rows: number): void {
+  if (telnetSids.has(sid)) void window.api.telnetResize(sid, cols, rows);
+  else if (serialSids.has(sid)) void window.api.serialResize(sid, cols, rows);
+  else void window.api.sshResize(sid, cols, rows);
+}
+
+function termSessionClose(sid: string): Promise<void> {
+  if (telnetSids.has(sid)) return window.api.telnetCloseSession(sid);
+  if (serialSids.has(sid)) return window.api.serialCloseSession(sid);
+  return window.api.sshCloseSession(sid);
+}
+
+function forgetSid(sid: string): void {
+  telnetSids.delete(sid);
+  serialSids.delete(sid);
+}
+
+// Protocols whose connection status is driven by the embedded terminal window
+// (via ssh-report-status) rather than by a cloudflared process.
+function isDirectTerminalProtocol(p: string | undefined): boolean {
+  return p === "ssh" || p === "telnet" || p === "serial";
+}
 
 function genTabId(): string {
   return `tab-${++termTabCounter}`;
@@ -620,6 +691,14 @@ const sshKeyClearBtn = document.getElementById("ssh-key-clear") as HTMLButtonEle
 const sshKeyPassphraseInput = document.getElementById(
   "ssh-key-passphrase",
 ) as HTMLInputElement;
+const serialPathInput = document.getElementById("serial-path") as HTMLInputElement | null;
+const serialPortList = document.getElementById(
+  "serial-port-list",
+) as HTMLDataListElement | null;
+const serialPortHint = document.getElementById("serial-port-hint") as HTMLElement | null;
+const serialRefreshBtn = document.getElementById(
+  "serial-refresh",
+) as HTMLButtonElement | null;
 const newBtn = document.getElementById("new-connection") as HTMLButtonElement;
 const cancelTopBtn = document.getElementById("cancel-save") as HTMLButtonElement;
 const cancelBotBtn = document.getElementById("cancel-save-bottom") as HTMLButtonElement;
@@ -843,6 +922,8 @@ function protocolLabel(p: string): string {
       return "SSH / Direct";
     case "telnet":
       return "Telnet";
+    case "serial":
+      return "Serial Port";
     case "http":
       return "HTTP";
     case "https":
@@ -869,6 +950,8 @@ function protocolLabelHtml(p: string): string {
       return "SSH / Direct";
     case "telnet":
       return "Telnet";
+    case "serial":
+      return "Serial Port";
     case "http":
       return "HTTP";
     case "https":
@@ -880,7 +963,7 @@ function protocolLabelHtml(p: string): string {
 
 function connectLabel(p: string): string {
   if (p === "http" || p === "https") return "Open in Browser";
-  if (p === "ssh" || p === "telnet") return "Launch";
+  if (p === "ssh" || p === "telnet" || p === "serial") return "Launch";
   return "Connect";
 }
 
@@ -888,26 +971,165 @@ function isSshProtocol(p: string): boolean {
   return p === "ssh" || p === "ssh-cf";
 }
 
+// Compact serial line-settings summary, e.g. "9600 8N1 · RTS/CTS · UTF-8".
+function serialSummary(cfg: SerialConfig): string {
+  const parityChar =
+    { none: "N", even: "E", odd: "O", mark: "M", space: "S" }[cfg.parity] ?? "N";
+  const flow =
+    cfg.flowControl === "rtscts"
+      ? "RTS/CTS"
+      : cfg.flowControl === "xonxoff"
+        ? "XON/XOFF"
+        : "no flow";
+  const enc = { utf8: "UTF-8", ascii: "ASCII", latin1: "Latin-1", utf16le: "UTF-16LE" }[
+    cfg.encoding
+  ];
+  return `${cfg.baudRate} ${cfg.dataBits}${parityChar}${cfg.stopBits} · ${flow} · ${enc}`;
+}
+
 function localEndpoint(conn: Connection): string {
+  // Serial connections have no network port — the device path is the endpoint.
+  if (conn.protocol === "serial") return conn.serialPath || conn.hostname;
   const isCf = conn.protocol === "rdp-cf" || conn.protocol === "ssh-cf";
   // CF tunnels bind a dynamic local port; the meaningful endpoint is the
   // Cloudflare hostname (the local bind is surfaced separately as "Tunnel bind").
   return isCf ? conn.hostname : `${conn.hostname}:${conn.port}`;
 }
 
-// Show/hide the SSH key and jump host fields based on selected protocol.
+// Show/hide protocol-specific form fields based on the selected protocol.
+// (Named updateSshKeyVisibility historically; now governs SSH, serial, and the
+// shared hostname/port/credentials rows.)
 function updateSshKeyVisibility() {
   const proto = protocolInput.value;
   const isSsh = isSshProtocol(proto);
+  const isSerial = proto === "serial";
   sshKeyGroup.style.display = isSsh ? "" : "none";
   const jumpGroup = document.getElementById("jump-host-group");
   if (jumpGroup) jumpGroup.style.display = isSsh ? "" : "none";
+
+  // Serial replaces the network hostname/port/credentials with a device path
+  // and line-settings panel.
+  const setShown = (id: string, shown: boolean) => {
+    const el = document.getElementById(id);
+    if (el) el.style.display = shown ? "" : "none";
+  };
+  setShown("hostname-group", !isSerial);
+  setShown("port-group", !isSerial);
+  setShown("credentials-label", !isSerial);
+  setShown("credentials-group", !isSerial);
+  setShown("serial-port-group", isSerial);
+  setShown("serial-advanced-group", isSerial);
 }
 
 protocolInput.addEventListener("change", () => {
-  portInput.value = String(PROTOCOL_DEFAULT_PORTS[protocolInput.value] ?? 3389);
+  if (protocolInput.value === "serial") {
+    void refreshSerialPorts();
+  } else {
+    portInput.value = String(PROTOCOL_DEFAULT_PORTS[protocolInput.value] ?? 3389);
+  }
   updateSshKeyVisibility();
 });
+
+// ─── Serial form helpers ──────────────────────────────────────────────────────
+
+const DEFAULT_SERIAL: SerialConfig = {
+  baudRate: 9600,
+  dataBits: 8,
+  stopBits: 1,
+  parity: "none",
+  flowControl: "none",
+  encoding: "utf8",
+  dtr: true,
+  rts: true,
+  localEcho: false,
+  lineEnding: "cr",
+};
+
+function $select(id: string): HTMLSelectElement | null {
+  return document.getElementById(id) as HTMLSelectElement | null;
+}
+function $input(id: string): HTMLInputElement | null {
+  return document.getElementById(id) as HTMLInputElement | null;
+}
+
+// Populate the detected-ports datalist + hint from the main process.
+async function refreshSerialPorts(): Promise<void> {
+  if (!serialPortList) return;
+  if (serialPortHint) serialPortHint.textContent = "Scanning for serial ports…";
+  try {
+    const result = await window.api.serialListPorts();
+    if (!Array.isArray(result)) {
+      if (serialPortHint)
+        serialPortHint.textContent = `Could not list ports: ${result.error}`;
+      return;
+    }
+    serialPortList.innerHTML = result
+      .map((p) => {
+        const desc = [p.friendlyName || p.manufacturer, p.serialNumber]
+          .filter(Boolean)
+          .join(" · ");
+        const opt = document.createElement("option");
+        opt.value = p.path;
+        if (desc) opt.label = desc;
+        return opt.outerHTML;
+      })
+      .join("");
+    if (serialPortHint) {
+      serialPortHint.textContent = result.length
+        ? `${result.length} port${result.length === 1 ? "" : "s"} detected — type or pick one above.`
+        : "No serial ports detected. Plug in a device, then Refresh.";
+    }
+  } catch (err) {
+    if (serialPortHint)
+      serialPortHint.textContent = `Could not list ports: ${errorMsg(err, "unknown error")}`;
+  }
+}
+
+// Read the serial settings panel into a SerialConfig object.
+function readSerialFormConfig(): SerialConfig {
+  return {
+    baudRate: Number($input("serial-baud")?.value) || DEFAULT_SERIAL.baudRate,
+    dataBits: Number($select("serial-databits")?.value) || DEFAULT_SERIAL.dataBits,
+    stopBits: Number($select("serial-stopbits")?.value) || DEFAULT_SERIAL.stopBits,
+    parity: ($select("serial-parity")?.value as SerialConfig["parity"]) ?? "none",
+    flowControl: ($select("serial-flow")?.value as SerialConfig["flowControl"]) ?? "none",
+    encoding: ($select("serial-encoding")?.value as SerialConfig["encoding"]) ?? "utf8",
+    dtr: $input("serial-dtr")?.checked ?? true,
+    rts: $input("serial-rts")?.checked ?? true,
+    localEcho: $input("serial-localecho")?.checked ?? false,
+    lineEnding:
+      ($select("serial-lineending")?.value as SerialConfig["lineEnding"]) ?? "cr",
+  };
+}
+
+// Write a SerialConfig (or defaults) into the serial settings panel.
+function writeSerialFormConfig(cfg: SerialConfig | null): void {
+  const c = cfg ?? DEFAULT_SERIAL;
+  if ($input("serial-baud")) $input("serial-baud")!.value = String(c.baudRate);
+  if ($select("serial-databits")) $select("serial-databits")!.value = String(c.dataBits);
+  if ($select("serial-stopbits")) $select("serial-stopbits")!.value = String(c.stopBits);
+  if ($select("serial-parity")) $select("serial-parity")!.value = c.parity;
+  if ($select("serial-flow")) $select("serial-flow")!.value = c.flowControl;
+  if ($select("serial-encoding")) $select("serial-encoding")!.value = c.encoding;
+  if ($input("serial-dtr")) $input("serial-dtr")!.checked = c.dtr;
+  if ($input("serial-rts")) $input("serial-rts")!.checked = c.rts;
+  if ($input("serial-localecho")) $input("serial-localecho")!.checked = c.localEcho;
+  if ($select("serial-lineending")) $select("serial-lineending")!.value = c.lineEnding;
+  // Sync the custom-select chrome to the new <select> values.
+  for (const id of [
+    "serial-databits",
+    "serial-stopbits",
+    "serial-parity",
+    "serial-flow",
+    "serial-encoding",
+    "serial-lineending",
+  ]) {
+    const sel = $select(id);
+    if (sel) refreshCustomSelect(sel);
+  }
+}
+
+serialRefreshBtn?.addEventListener("click", () => void refreshSerialPorts());
 
 sshKeyBrowseBtn.addEventListener("click", async () => {
   const picked = await window.api.pickFile({
@@ -1479,10 +1701,8 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
         void navigator.clipboard.readText().then((text) => {
           if (!text || !tab.sessionId) return;
           const sid = tab.sessionId;
-          const send = telnetSids.has(sid)
-            ? (d: string) => void window.api.telnetWrite(sid, d)
-            : (d: string) => void window.api.sshWrite(sid, d);
-          for (let i = 0; i < text.length; i += 1024) send(text.slice(i, i + 1024));
+          for (let i = 0; i < text.length; i += 1024)
+            termSessionWrite(sid, text.slice(i, i + 1024));
         });
         return false;
       }
@@ -1507,10 +1727,8 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
             void navigator.clipboard.readText().then((text) => {
               if (!text || !tab.sessionId) return;
               const sid = tab.sessionId;
-              const send = telnetSids.has(sid)
-                ? (d: string) => void window.api.telnetWrite(sid, d)
-                : (d: string) => void window.api.sshWrite(sid, d);
-              for (let i = 0; i < text.length; i += 1024) send(text.slice(i, i + 1024));
+              for (let i = 0; i < text.length; i += 1024)
+                termSessionWrite(sid, text.slice(i, i + 1024));
             });
           },
         },
@@ -1552,11 +1770,13 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
     if (c) renderTerminalDetail(c);
   }
 
-  // For ssh-direct and telnet, the main process leaves status at "connecting"
-  // until we confirm the session succeeded or failed via ssh-report-status.
+  // For ssh-direct, telnet, and serial the main process leaves status at
+  // "connecting" until we confirm the session succeeded or failed via
+  // ssh-report-status.
   const connProtocol = connections.find((c) => c.id === connId)?.protocol ?? "";
   const isTelnet = connProtocol === "telnet";
-  const isDirectProtocol = connProtocol === "ssh" || isTelnet;
+  const isSerial = connProtocol === "serial";
+  const isDirectProtocol = isDirectTerminalProtocol(connProtocol);
 
   try {
     if (type === "term") {
@@ -1565,6 +1785,10 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
         sid = await window.api.telnetTermCreate(connId);
         const st = termState.get(connId);
         if (st) st.osInfo = "telnet";
+      } else if (isSerial) {
+        sid = await window.api.serialTermCreate(connId);
+        const st = termState.get(connId);
+        if (st) st.osInfo = "serial";
       } else {
         sid = await window.api.sshTermCreate(connId);
       }
@@ -1573,22 +1797,18 @@ async function addTermTab(connId: string, type: TermTabType): Promise<void> {
         // Tab was closed while connecting — kill the session immediately.
         void (isTelnet
           ? window.api.telnetCloseSession(sid)
-          : window.api.sshCloseSession(sid));
+          : isSerial
+            ? window.api.serialCloseSession(sid)
+            : window.api.sshCloseSession(sid));
         return;
       }
       tab.sessionId = sid;
       sidToTab.set(sid, { connId, tabId });
 
-      if (isTelnet) {
-        telnetSids.add(sid);
-        tab.term!.onData((data) => void window.api.telnetWrite(sid, data));
-        tab.term!.onResize(
-          ({ cols, rows }) => void window.api.telnetResize(sid, cols, rows),
-        );
-      } else {
-        tab.term!.onData((data) => window.api.sshWrite(sid, data));
-        tab.term!.onResize(({ cols, rows }) => window.api.sshResize(sid, cols, rows));
-      }
+      if (isTelnet) telnetSids.add(sid);
+      else if (isSerial) serialSids.add(sid);
+      tab.term!.onData((data) => termSessionWrite(sid, data));
+      tab.term!.onResize(({ cols, rows }) => termSessionResize(sid, cols, rows));
 
       tab.fitAddon!.fit();
       if (isDirectProtocol) void window.api.sshReportStatus(connId, true);
@@ -1635,14 +1855,11 @@ function closeTermTab(connId: string, tabId: string): void {
   if (tab.sessionId) {
     const sid = tab.sessionId;
     sidToTab.delete(sid);
-    const isTelnetSid = telnetSids.has(sid);
-    telnetSids.delete(sid);
-    void (isTelnetSid
-      ? window.api.telnetCloseSession(sid)
-      : window.api.sshCloseSession(sid));
+    void termSessionClose(sid);
+    forgetSid(sid);
     // For direct-protocol connections: report disconnect if no other live term tabs remain.
     const proto = connections.find((c) => c.id === connId)?.protocol;
-    if ((proto === "ssh" || proto === "telnet") && tab.type === "term") {
+    if (isDirectTerminalProtocol(proto) && tab.type === "term") {
       const remaining = state.tabs.filter(
         (t) => t.tabId !== tabId && t.type === "term" && !t.closed,
       );
@@ -1654,8 +1871,7 @@ function closeTermTab(connId: string, tabId: string): void {
     tab.cancelled = true;
     void window.api.cancelSshConnect(connId);
     const proto = connections.find((c) => c.id === connId)?.protocol;
-    if (proto === "ssh" || proto === "telnet")
-      void window.api.sshReportStatus(connId, false);
+    if (isDirectTerminalProtocol(proto)) void window.api.sshReportStatus(connId, false);
   }
   if (tab.reconnectTimer !== null) clearTimeout(tab.reconnectTimer);
   tab.term?.dispose();
@@ -1709,11 +1925,8 @@ function closeAllTermTabs(connId: string): void {
     if (tab.sessionId) {
       const sid = tab.sessionId;
       sidToTab.delete(sid);
-      const isTelnetSid = telnetSids.has(sid);
-      telnetSids.delete(sid);
-      void (isTelnetSid
-        ? window.api.telnetCloseSession(sid)
-        : window.api.sshCloseSession(sid));
+      void termSessionClose(sid);
+      forgetSid(sid);
     } else if (!tab.closed) {
       tab.cancelled = true;
       hasPending = true;
@@ -2328,6 +2541,9 @@ function getOsIcon(os: string, size = 14): string {
   // Telnet — double wave
   if (s === "telnet")
     return `<svg ${d}><path d="M2 8c2.5-3.5 5.5-3.5 8 0s5.5 3.5 8 0" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/><path d="M2 16c2.5-3.5 5.5-3.5 8 0s5.5 3.5 8 0" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round"/></svg>`;
+  // Serial — DE-9 style connector plug
+  if (s === "serial")
+    return `<svg ${d}><rect x="3" y="6" width="18" height="12" rx="2" stroke="currentColor" stroke-width="1.6" fill="none"/><circle cx="7" cy="10" r="1" fill="currentColor"/><circle cx="10.5" cy="10" r="1" fill="currentColor"/><circle cx="14" cy="10" r="1" fill="currentColor"/><circle cx="17" cy="10" r="1" fill="currentColor"/><circle cx="8.75" cy="14" r="1" fill="currentColor"/><circle cx="12.25" cy="14" r="1" fill="currentColor"/><circle cx="15.75" cy="14" r="1" fill="currentColor"/></svg>`;
   // Generic terminal prompt
   return `<svg ${d}><polyline points="4 8 9 12 4 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><line x1="12" y1="16" x2="20" y2="16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`;
 }
@@ -2936,7 +3152,8 @@ function renderDetail() {
   const svgTrash = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>`;
   const svgActivity = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>`;
 
-  const isSshOrTelnet = proto === "ssh-cf" || proto === "ssh" || proto === "telnet";
+  const isSshOrTelnet =
+    proto === "ssh-cf" || proto === "ssh" || proto === "telnet" || proto === "serial";
   const relaunchLabel = "Open Terminal";
 
   let connectActions = "";
@@ -3028,13 +3245,19 @@ function renderDetail() {
     <div class="prop-section-label">Details</div>
     <div class="prop-list">
       <div class="prop-row">
-        <span class="prop-label">Endpoint</span>
+        <span class="prop-label">${proto === "serial" ? "Device" : "Endpoint"}</span>
         <span class="prop-value mono">${escapeHtml(endpoint)} ${copyEndpointBtn}</span>
       </div>
-      <div class="prop-row">
+      ${
+        proto === "serial"
+          ? conn.serial
+            ? `<div class="prop-row"><span class="prop-label">Settings</span><span class="prop-value mono">${escapeHtml(serialSummary(conn.serial))}</span></div>`
+            : ""
+          : `<div class="prop-row">
         <span class="prop-label">Port</span>
         <span class="prop-value mono">${conn.port}</span>
-      </div>
+      </div>`
+      }
       <div class="prop-row">
         <span class="prop-label">Protocol</span>
         <span class="prop-value">${protocolLabelHtml(proto)}</span>
@@ -3661,7 +3884,12 @@ async function handleAction(action: string, id: string, value?: string) {
     try {
       showToast(`${label}…`, "info");
       await window.api.connect(id);
-      if (proto === "ssh" || proto === "ssh-cf" || proto === "telnet") {
+      if (
+        proto === "ssh" ||
+        proto === "ssh-cf" ||
+        proto === "telnet" ||
+        proto === "serial"
+      ) {
         appendLog(`Opening terminal — ${connName(id)}`);
         showToast("Opening terminal…", "info");
         void window.api.openTermWindow(id, connName(id));
@@ -3830,7 +4058,11 @@ function resetForm() {
   sshKeyPassphraseInput.value = "";
   sshKeyPassphraseInput.placeholder = "Leave empty if key has no passphrase";
   notesInput.value = "";
+  if (serialPathInput) serialPathInput.value = "";
+  if (serialPortHint) serialPortHint.textContent = "";
+  writeSerialFormConfig(DEFAULT_SERIAL);
   updateSshKeyVisibility();
+  if (protocolInput.value === "serial") void refreshSerialPorts();
   formTitle.textContent = "New Tunnel";
 }
 
@@ -3846,12 +4078,17 @@ formModal.addEventListener("click", (e) => {
 saveForm.addEventListener("submit", async (e) => {
   e.preventDefault();
   const isEdit = !!idInput.value;
+  const protocol = protocolInput.value || "rdp-cf";
+  const isSerial = protocol === "serial";
+  const serialPath = serialPathInput?.value.trim() ?? "";
   const conn = {
     id: idInput.value || undefined,
     friendlyName: nameInput.value.trim(),
-    hostname: hostInput.value.trim(),
+    // For serial the device path doubles as the displayed hostname (the main
+    // process derives hostname from serialPath), so send it as both.
+    hostname: isSerial ? serialPath : hostInput.value.trim(),
     port: Number(portInput.value) || 3389,
-    protocol: protocolInput.value || "rdp-cf",
+    protocol,
     username: usernameInput.value.trim() || undefined,
     password: passwordInput.value || undefined,
     keepExistingPassword: isEdit && !passwordInput.value,
@@ -3865,9 +4102,17 @@ saveForm.addEventListener("submit", async (e) => {
       undefined,
     jumpPort:
       Number((document.getElementById("jump-port") as HTMLInputElement)?.value) || 22,
+    serialPath: isSerial ? serialPath : undefined,
+    serial: isSerial ? readSerialFormConfig() : undefined,
   };
 
-  if (!conn.hostname) {
+  if (isSerial) {
+    if (!serialPath) {
+      showToast("Serial port is required (e.g. COM3 or /dev/ttyUSB0).", "error");
+      serialPathInput?.focus();
+      return;
+    }
+  } else if (!conn.hostname) {
     showToast("Hostname is required.", "error");
     hostInput.focus();
     return;
@@ -4251,7 +4496,7 @@ window.api.onSshClose(({ sid }) => {
   const loc = sidToTab.get(sid);
   if (!loc) return;
   sidToTab.delete(sid);
-  telnetSids.delete(sid);
+  forgetSid(sid);
   const state = termState.get(loc.connId);
   const tab = state?.tabs.find((t) => t.tabId === loc.tabId);
   if (!tab) return;
@@ -4260,11 +4505,11 @@ window.api.onSshClose(({ sid }) => {
   if (tab.term) tab.term.write("\r\n\x1b[31mConnection closed.\x1b[0m\r\n");
   const conn = connections.find((c) => c.id === loc.connId);
   const proto = conn?.protocol ?? "";
-  appendLog(
-    `${proto === "telnet" ? "Telnet" : "SSH"} session closed — ${connName(loc.connId)}`,
-  );
+  const protoLabel =
+    proto === "telnet" ? "Telnet" : proto === "serial" ? "Serial" : "SSH";
+  appendLog(`${protoLabel} session closed — ${connName(loc.connId)}`);
   // For direct-protocol connections: mark disconnected when no live term tabs remain.
-  if (proto === "ssh" || proto === "telnet") {
+  if (isDirectTerminalProtocol(proto)) {
     const hasOpen = state?.tabs.some(
       (t) => t.type === "term" && !t.closed && t.tabId !== loc.tabId,
     );
@@ -4423,7 +4668,11 @@ async function initFormWindow(connId: string | null): Promise<void> {
         ) as HTMLInputElement | null;
         if (jumpHostEl) jumpHostEl.value = conn.jumpHost || "";
         if (jumpPortEl) jumpPortEl.value = String(conn.jumpPort ?? 22);
+        if (serialPathInput)
+          serialPathInput.value = conn.serialPath || conn.hostname || "";
+        writeSerialFormConfig(conn.serial);
         updateSshKeyVisibility();
+        if (conn.protocol === "serial") void refreshSerialPorts();
         formTitle.textContent = "Edit Tunnel";
       }
     } catch {}
