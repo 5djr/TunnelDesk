@@ -1,7 +1,24 @@
 const { spawn } = require("child_process");
+const net = require("net");
 const { shell } = require("electron");
 const { activeConnections, latencyHistory } = require("./state");
 const { sendConnectionLog, updateStatus, safeSend } = require("./messaging");
+
+// Ask the OS for an unused TCP port on the loopback interface. Each Cloudflare
+// Access tunnel binds its own local listener, so two connections that share the
+// same configured port (e.g. RDP's default 3389) would otherwise collide on
+// 127.0.0.1:3389. Binding to port 0 lets the kernel hand back a free port.
+function getFreeLocalPort() {
+  return new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.unref();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const { port } = srv.address();
+      srv.close(() => resolve(port));
+    });
+  });
+}
 
 function isProcessAlive(proc) {
   if (!proc) return false;
@@ -158,20 +175,23 @@ async function startCloudflared(connection, password, cfBinaryPath) {
   const cfBinary =
     cfBinaryPath && cfBinaryPath.trim() ? cfBinaryPath.trim() : "cloudflared";
   const cfAccess = (connection.protocol || "rdp-cf") === "ssh-cf" ? "ssh" : "rdp";
+  // Allocate a unique loopback port for this tunnel so multiple connections
+  // (e.g. two RDP hosts both configured for 3389) never fight over one port.
+  const localPort = await getFreeLocalPort();
   const args = [
     "access",
     cfAccess,
     "--hostname",
     connection.hostname,
     "--url",
-    `${cfAccess}://localhost:${connection.port}`,
+    `${cfAccess}://localhost:${localPort}`,
   ];
   const proc = spawn(cfBinary, args, {
     windowsHide: true,
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  activeConnections.set(connection.id, { proc, connection, password });
+  activeConnections.set(connection.id, { proc, connection, password, localPort });
   updateStatus(connection.id, "connecting");
 
   proc.on("exit", () => {
@@ -223,6 +243,16 @@ async function stopConnection(connectionId) {
           `Unable to stop tunnel cleanly: ${error.message}`,
         );
       }
+    }
+    // Remove the Windows credential stored for this tunnel's loopback port.
+    // Each tunnel binds a unique local port, so without this the credentials
+    // would accumulate in Credential Manager across reconnects.
+    const proto = active.connection && (active.connection.protocol || "rdp-cf");
+    if (proto === "rdp-cf" || proto === "rdp") {
+      try {
+        const { deleteStoredCredential } = require("./rdp");
+        deleteStoredCredential(active.localPort ?? active.connection.port);
+      } catch {}
     }
   }
   activeConnections.delete(connectionId);

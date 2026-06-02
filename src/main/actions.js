@@ -26,12 +26,11 @@ async function connectById(connectionId) {
 
   if (protocol === "rdp-cf") {
     await startCloudflared(connection, password, settings.cloudflaredPath);
-    await launchRemoteDesktop(
-      connection.port,
-      connection.id,
-      connection.username,
-      password,
-    );
+    // cloudflared listens on a dynamically allocated loopback port (see tunnel.js);
+    // point mstsc/xfreerdp at that port, not the configured one.
+    const entry = activeConnections.get(connection.id);
+    const localPort = entry?.localPort ?? connection.port;
+    await launchRemoteDesktop(localPort, connection.id, connection.username, password);
   } else if (protocol === "rdp") {
     await launchRemoteDesktopDirect(connection, password);
   } else if (protocol === "ssh-cf") {

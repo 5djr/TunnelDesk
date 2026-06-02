@@ -197,7 +197,7 @@ function registerIpcHandlers() {
       throw new Error("Cloudflare tunnel is not active — connect first");
     }
     await launchRemoteDesktop(
-      active.connection.port,
+      active.localPort ?? active.connection.port,
       id,
       active.connection.username,
       active.password,
@@ -229,10 +229,15 @@ function registerIpcHandlers() {
     const uptime = connectedAt ? Math.floor((Date.now() - connectedAt) / 1000) : null;
 
     const measureHost = isCfTunnel ? "127.0.0.1" : connection.hostname;
+    // CF tunnels listen on a dynamically allocated loopback port; fall back to
+    // the configured port for direct connections.
+    const localPort = isCfTunnel
+      ? (active.localPort ?? connection.port)
+      : connection.port;
 
     const [latency, cloudflaredMemBytes, mstscMemBytes] = await Promise.all([
       alive
-        ? measureRoundTripLatency(measureHost, connection.port, protocol)
+        ? measureRoundTripLatency(measureHost, localPort, protocol)
         : Promise.resolve(null),
       isCfTunnel ? getProcessMemoryBytes(pid) : Promise.resolve(null),
       isRdpProto
@@ -271,7 +276,7 @@ function registerIpcHandlers() {
     return {
       pid,
       localEndpoint: isCfTunnel
-        ? `localhost:${connection.port}`
+        ? `localhost:${localPort}`
         : `${connection.hostname}:${connection.port}`,
       hostname: connection.hostname,
       protocol,

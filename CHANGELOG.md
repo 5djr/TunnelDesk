@@ -5,6 +5,17 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-06-02
+
+### Fixed
+
+- **Multiple simultaneous Cloudflare Access connections** — each `cloudflared access` tunnel now binds a unique, OS-allocated loopback port instead of the connection's configured port (e.g. RDP's default 3389). Previously, connecting to a second RDP (or SSH) host over Cloudflare Access failed with `bind: Only one usage of each socket address ... is normally permitted` because both tunnels tried to bind `127.0.0.1:3389`. RDP launch, SSH connect, latency probing, and the displayed local endpoint all follow the allocated port.
+- Windows RDP credentials stored in Credential Manager are now removed on disconnect (not just on app quit), preventing credentials from accumulating across reconnects now that each tunnel uses a distinct local port.
+
+### Changed
+
+- Expanded `.gitignore` to cover secrets (`.env`, `*.pem`, `*.key`), app runtime data (`connections.json`, `settings.json`), editor/IDE files, and additional OS and build artifacts.
+
 ## [0.2.4] - 2026-05-29
 
 ### Fixed
