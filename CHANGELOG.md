@@ -5,13 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.8] - 2026-06-02
+
+### Added
+
+- **Live Debug panel** — the connection Debug panel (renamed from "Tunnel Stats") now refreshes Uptime and the round-trip latency stats (current, min, max, average, jitter, samples) every second, and is restyled to match the Details card.
+- **Reduce GPU usage setting** — Settings toggle that disables hardware acceleration to lower memory and GPU load on low-end PCs (requires a restart to take effect).
+- **Truecolor SSH terminals** — full-screen TUIs such as `btop`/`htop` render smooth 24-bit color gradients (`COLORTERM=truecolor` is signalled on the SSH PTY, best-effort; servers that don't accept it fall back to 256 colors).
+- Cross-platform unit tests (`npm test`, Node's built-in test runner — no install required) covering dynamic local-port allocation and the RDP launch helpers; a GitHub Actions Test workflow runs them on Ubuntu, macOS, and Windows for every push and pull request.
+
+### Changed
+
+- Terminal tuned for low-end PCs: the blinking cursor is disabled (removes a constant idle repaint) and scrollback is reduced from 5000 to 2000 lines (lower per-terminal memory).
+- The per-second Debug poll and uptime ticker now pause while the window is hidden (minimized / sent to tray) to cut background CPU and network use.
+- Main window minimum size is now 775×645; the connection command bar wraps instead of clipping at smaller sizes.
+
 ### Fixed
 
 - Connection details **Endpoint** for Cloudflare Access tunnels now shows the Cloudflare hostname instead of a stale `localhost:<configured-port>` that no longer matched the dynamically-allocated local port (shown as "Tunnel bind" in stats).
 
-### Added
+### Security
 
-- Cross-platform unit tests (`npm test`, Node's built-in test runner — no install required) covering dynamic local-port allocation and the RDP launch helpers; a GitHub Actions Test workflow runs them on Ubuntu, macOS, and Windows for every push and pull request.
+- Reject hostnames and usernames beginning with `-` to block argument injection into the external `ssh`/`telnet` clients (also protects remote sync-managed connections).
+- `sftp-upload-path` now validates the local path points at a real regular file before reading it, preventing a compromised renderer from exfiltrating arbitrary local files to a connected host.
+- `sftp-download` derives the suggested filename via `path.basename` on a string-coerced path, avoiding crashes and filename spoofing from a malicious server listing.
+- Credential and token files (connections, settings, OAuth token cache, activity log, temporary `.rdp`) are written with `0600` (owner-only) permissions on Linux/macOS.
 
 ## [0.2.7] - 2026-06-02
 
